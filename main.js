@@ -81,7 +81,7 @@ var DEFAULT_SETTINGS = {
     folderPath: "assets/",
     deleteLocal: false,
     useEncryption: true,
-    repoVisibility: 'public',
+    repoVisibility: 'auto',
     uploadOnPaste: 'always',
     localImageFolder: 'notepix-local',
     uploadImageFolder: 'notepix-uploads',
@@ -92,7 +92,10 @@ var DEFAULT_SETTINGS = {
     localOnlyList: [],
     // Mobile integration defaults (safe no-ops on desktop)
     attachmentsFolderName: 'attachment',
-    integrateAttachmentsOnMobile: true
+    integrateAttachmentsOnMobile: true,
+    // Repo mismatch prompt suppression
+    lastPromptedAt: 0,
+    lastPromptedRepo: ''
 };
 var MyPlugin = class extends import_obsidian.Plugin {
     constructor() {
@@ -105,6 +108,11 @@ var MyPlugin = class extends import_obsidian.Plugin {
         // From enhanced mobile version: track pending link replacements and recent placeholders
         this.pendingLinkReplacements = new Map();
         this.recentPlaceholdersByName = new Map();
+        // Repo privacy detection cache: { value, timestamp, user, repo }
+        this.repoPrivacyCache = null;
+        this._fileOpenDebounceTimer = null;
+        this._mismatchNoticeShown = false;
+        this._lastRenderTokenNoticeAt = 0;
     }
     getVaultFolderPaths() {
         const res = [];
@@ -362,11 +370,24 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 await this.handleImageUpload(file);
             })
         );
+
+        // Mismatch detection: debounced check on file open (auto mode)
+        this.registerEvent(
+            this.app.workspace.on("file-open", (file) => {
+                if (file) this.checkRepoMismatchOnFileOpen(file);
+            })
+        );
     }
 
     onunload() {
         // Clear the decrypted token from memory
         this.decryptedToken = null;
+        // Clear repo privacy cache and debounce timer
+        this.repoPrivacyCache = null;
+        if (this._fileOpenDebounceTimer) {
+            clearTimeout(this._fileOpenDebounceTimer);
+            this._fileOpenDebounceTimer = null;
+        }
 
         // IMPORTANT: Revoke all created blob URLs to prevent memory leaks
         if (this.imageCache) {
@@ -559,6 +580,142 @@ var MyPlugin = class extends import_obsidian.Plugin {
         return null;
     }
 
+    // --- Repo Privacy Detection (cached, 10-min TTL) ---
+    async getRepoPrivacy() {
+        const user = (this.settings.githubUser || '').trim();
+        const repo = (this.settings.repoName || '').trim();
+        if (!user || !repo) return "unknown";
+
+        // Return cached value if still valid (10 min TTL, same user+repo)
+        if (this.repoPrivacyCache &&
+            this.repoPrivacyCache.user === user &&
+            this.repoPrivacyCache.repo === repo &&
+            (Date.now() - this.repoPrivacyCache.timestamp) < 10 * 60 * 1000) {
+            return this.repoPrivacyCache.value;
+        }
+
+        // Need a token — don't trigger password prompt, only use what's available
+        let token;
+        if (this.decryptedToken) {
+            token = this.decryptedToken;
+        } else if (!this.settings.useEncryption && this.settings.plainToken) {
+            token = this.settings.plainToken.trim();
+        }
+        if (!token) return "unknown";
+
+        try {
+            const response = await fetch(
+                `https://api.github.com/repos/${encodeURIComponent(user)}/${encodeURIComponent(repo)}`,
+                { headers: { "Authorization": `token ${token}`, "Accept": "application/vnd.github.v3+json" } }
+            );
+            if (!response.ok) return "unknown";
+            const json = await response.json();
+            const value = json.private ? "private" : "public";
+            this.repoPrivacyCache = { value, timestamp: Date.now(), user, repo };
+            return value;
+        } catch (e) {
+            console.error("NotePix: Failed to detect repo privacy:", e);
+            return "unknown";
+        }
+    }
+
+    clearRepoPrivacyCache() {
+        this.repoPrivacyCache = null;
+    }
+
+    // Check if content contains raw GitHub image URLs from the currently configured repo
+    containsConfiguredRepoRawImages(content) {
+        if (!content) return false;
+        const user = (this.settings.githubUser || '').trim();
+        const repo = (this.settings.repoName || '').trim();
+        if (!user || !repo) return false;
+        const escapedUser = user.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+        const escapedRepo = repo.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+        const regex = new RegExp(`raw\\.githubusercontent\\.com/${escapedUser}/${escapedRepo}/`, 'i');
+        return regex.test(content);
+    }
+
+    // Debounced mismatch check triggered on file-open (auto mode only)
+    checkRepoMismatchOnFileOpen(file) {
+        if (this._fileOpenDebounceTimer) {
+            clearTimeout(this._fileOpenDebounceTimer);
+        }
+        this._fileOpenDebounceTimer = setTimeout(async () => {
+            try {
+                if (!file || !file.path || !file.path.endsWith('.md')) return;
+                // Only run in auto mode
+                if (this.settings.repoVisibility !== 'auto') return;
+
+                const content = await this.app.vault.read(file);
+                if (!this.containsConfiguredRepoRawImages(content)) return;
+
+                const privacy = await this.getRepoPrivacy();
+                if (privacy !== 'private') return;
+
+                // Prompt suppression: skip if same repo prompted within 24 hours
+                const user = (this.settings.githubUser || '').trim();
+                const repo = (this.settings.repoName || '').trim();
+                const repoKey = `${user}/${repo}`;
+                const lastAt = this.settings.lastPromptedAt || 0;
+                const lastRepo = this.settings.lastPromptedRepo || '';
+                const twentyFourHours = 24 * 60 * 60 * 1000;
+
+                if (lastRepo === repoKey && (Date.now() - lastAt) < twentyFourHours) return;
+
+                // Show 3-button mismatch modal
+                const modal = new RepoMismatchModal(this.app, repoKey);
+                const choice = await modal.openAndWait();
+
+                // Persist prompt timestamp regardless of choice
+                this.settings.lastPromptedAt = Date.now();
+                this.settings.lastPromptedRepo = repoKey;
+
+                if (choice === 'auto') {
+                    this.settings.repoVisibility = 'auto';
+                    new import_obsidian.Notice("NotePix: Auto mode enabled. Images will load via API for private repos.");
+                } else if (choice === 'private') {
+                    this.settings.repoVisibility = 'private';
+                    new import_obsidian.Notice("NotePix: Switched to Private mode. Future uploads use private format.");
+                } else if (choice === 'public') {
+                    this.settings.repoVisibility = 'public';
+                    new import_obsidian.Notice("NotePix: Keeping Public mode. Raw URLs may not load for private repos.");
+                }
+                // If choice is null (modal closed without picking), suppress for 24h anyway
+                await this.saveSettings();
+            } catch (e) {
+                console.error("NotePix: Mismatch check error:", e);
+            }
+        }, 500);
+    }
+
+    async maybePromptRepoMismatch(repoKey) {
+        const lastAt = this.settings.lastPromptedAt || 0;
+        const lastRepo = this.settings.lastPromptedRepo || '';
+        const twentyFourHours = 24 * 60 * 60 * 1000;
+        if (lastRepo === repoKey && (Date.now() - lastAt) < twentyFourHours) {
+            return null;
+        }
+
+        const modal = new RepoMismatchModal(this.app, repoKey);
+        const choice = await modal.openAndWait();
+
+        this.settings.lastPromptedAt = Date.now();
+        this.settings.lastPromptedRepo = repoKey;
+
+        if (choice === 'auto') {
+            this.settings.repoVisibility = 'auto';
+            new import_obsidian.Notice("NotePix: Auto mode enabled. Images will load via API for private repos.");
+        } else if (choice === 'private') {
+            this.settings.repoVisibility = 'private';
+            new import_obsidian.Notice("NotePix: Switched to Private mode. Future uploads use private format.");
+        } else if (choice === 'public') {
+            this.settings.repoVisibility = 'public';
+            new import_obsidian.Notice("NotePix: Keeping Public mode. Raw URLs may not load for private repos.");
+        }
+        await this.saveSettings();
+        return choice;
+    }
+
     async handleImageUpload(file, isPaste = false) {
         if (!this.settings.githubUser || !this.settings.repoName) {
             new import_obsidian.Notice("GitHub User and Repo Name must be configured.");
@@ -594,13 +751,40 @@ var MyPlugin = class extends import_obsidian.Plugin {
             }
 
             let finalUrl;
-            // Check the repository visibility setting
+            // Determine URL format based on repo visibility mode
             if (this.settings.repoVisibility === 'private') {
-                // For private repos, create our custom URL for the post-processor to handle.
-                finalUrl = `obsidian://notepix/${filePath}`;
+                // Private mode: self-describing format with owner/repo/branch embedded
+                const encOwner = encodeURIComponent(this.settings.githubUser);
+                const encRepo = encodeURIComponent(this.settings.repoName);
+                const encBranch = encodeURIComponent(this.settings.branchName);
+                const encPath = filePath.split('/').map(encodeURIComponent).join('/');
+                finalUrl = `obsidian://notepix/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
                 new import_obsidian.Notice("Private image link created.");
+            } else if (this.settings.repoVisibility === 'auto') {
+                // Auto mode: detect repo privacy and decide
+                const detectedPrivacy = await this.getRepoPrivacy();
+                if (detectedPrivacy === 'private') {
+                    const encOwner = encodeURIComponent(this.settings.githubUser);
+                    const encRepo = encodeURIComponent(this.settings.repoName);
+                    const encBranch = encodeURIComponent(this.settings.branchName);
+                    const encPath = filePath.split('/').map(encodeURIComponent).join('/');
+                    finalUrl = `obsidian://notepix/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
+                    new import_obsidian.Notice("Private repo detected. Private image link created.");
+                } else {
+                    // Public or unknown — use raw URL (safe fallback)
+                    finalUrl = `https://raw.githubusercontent.com/${this.settings.githubUser}/${this.settings.repoName}/${this.settings.branchName}/${filePath}`;
+                    if (detectedPrivacy === 'unknown') {
+                        new import_obsidian.Notice("Could not detect repo privacy. Using public URL as fallback.");
+                    }
+                }
             } else {
-                // For public repos, use the standard raw GitHub URL.
+                // Public mode: standard raw GitHub URL, but if repo is actually private,
+                // prompt user with the same 3-button mismatch modal.
+                const detectedPrivacy = await this.getRepoPrivacy();
+                if (detectedPrivacy === 'private') {
+                    const repoKey = `${(this.settings.githubUser || '').trim()}/${(this.settings.repoName || '').trim()}`;
+                    await this.maybePromptRepoMismatch(repoKey);
+                }
                 finalUrl = `https://raw.githubusercontent.com/${this.settings.githubUser}/${this.settings.repoName}/${this.settings.branchName}/${filePath}`;
             }
 
@@ -631,26 +815,94 @@ var MyPlugin = class extends import_obsidian.Plugin {
         this.isHandlingAction = true;
         try {
             const images = Array.from(element.querySelectorAll("img"));
-            if (images.length === 0) {
-                return;
-            }
+            if (images.length === 0) return;
 
-            // Only process images that are NotePix private links
-            const notepixImages = images.filter((img) => {
+            const cfgUser = (this.settings.githubUser || '').trim();
+            const cfgRepo = (this.settings.repoName || '').trim();
+            const rawPrefix = (cfgUser && cfgRepo)
+                ? `https://raw.githubusercontent.com/${cfgUser}/${cfgRepo}/`
+                : null;
+
+            // Categorize images into processable items
+            const toProcess = [];
+            const rawCandidates = [];
+            for (const img of images) {
                 const src = img.getAttribute("src");
-                return src && src.startsWith("obsidian://notepix/");
-            });
-            if (notepixImages.length === 0) {
-                return;
+                if (!src) continue;
+
+                if (src.startsWith("obsidian://notepix/")) {
+                    const afterPrefix = src.substring("obsidian://notepix/".length);
+                    if (afterPrefix.startsWith("v2/")) {
+                        // New self-describing format: v2/{owner}/{repo}/{branch}/{path}
+                        const parts = afterPrefix.substring(3).split('/');
+                        if (parts.length >= 4) {
+                            toProcess.push({
+                                img,
+                                owner: decodeURIComponent(parts[0]),
+                                repo: decodeURIComponent(parts[1]),
+                                branch: decodeURIComponent(parts[2]),
+                                path: parts.slice(3).map(decodeURIComponent).join('/'),
+                                type: 'notepix-v2'
+                            });
+                        }
+                    } else {
+                        // Legacy format: use current settings
+                        toProcess.push({
+                            img,
+                            owner: cfgUser,
+                            repo: cfgRepo,
+                            branch: this.settings.branchName || 'main',
+                            path: afterPrefix,
+                            type: 'notepix-legacy'
+                        });
+                    }
+                } else if (rawPrefix && src.startsWith(rawPrefix)) {
+                    const afterRepo = src.substring(rawPrefix.length);
+                    const slashIdx = afterRepo.indexOf('/');
+                    if (slashIdx > 0) {
+                        rawCandidates.push({
+                            img,
+                            owner: cfgUser,
+                            repo: cfgRepo,
+                            branch: afterRepo.substring(0, slashIdx),
+                            path: afterRepo.substring(slashIdx + 1),
+                            type: 'raw-fallback'
+                        });
+                    }
+                }
             }
 
-            const hoverPopover = (this.app && this.app.renderContext) ? this.app.renderContext.hoverPopover : null;
-            const isPopoverByAPI = !!hoverPopover;
+            // Decide whether raw fallback should be applied
+            if (rawCandidates.length > 0) {
+                let allowRawFallback = false;
+                let privacy = 'unknown';
+                if (this.settings.repoVisibility === 'private') {
+                    // Forced private mode: always treat configured repo as private for rendering
+                    privacy = 'private';
+                } else if (this.repoPrivacyCache &&
+                    this.repoPrivacyCache.user === cfgUser &&
+                    this.repoPrivacyCache.repo === cfgRepo &&
+                    (Date.now() - this.repoPrivacyCache.timestamp) < 10 * 60 * 1000) {
+                    privacy = this.repoPrivacyCache.value;
+                } else {
+                    // Auto/public modes: detect actual privacy; if private, render raw links via API in preview
+                    privacy = await this.getRepoPrivacy();
+                }
+                allowRawFallback = privacy === 'private';
+                if (allowRawFallback) {
+                    toProcess.push(...rawCandidates);
+                }
+            }
 
+            if (toProcess.length === 0) return;
+
+            // Token handling: avoid password prompt in hover popovers
+            const hoverPopover = (this.app && this.app.renderContext)
+                ? this.app.renderContext.hoverPopover : null;
+            const isPopoverByAPI = !!hoverPopover;
             const activeLeaf = this.app.workspace.activeLeaf;
             const isInActiveLeaf = activeLeaf && context.containerEl &&
                 activeLeaf.containerEl.contains(context.containerEl);
-
             const isHover = isPopoverByAPI || !isInActiveLeaf;
 
             let token;
@@ -662,39 +914,64 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 }
                 if (!token) return;
             } else {
-                token = await this.getToken();
-                if (!token) return; // User declined or missing token
+                // In active preview (non-hover), allow one password prompt when encrypted token exists.
+                // This restores expected behavior after app restart while still avoiding spam.
+                if (this.settings.useEncryption) {
+                    if (this.decryptedToken) {
+                        token = this.decryptedToken;
+                    } else if (this.settings.encryptedToken) {
+                        token = await this.getToken();
+                    } else {
+                        token = null;
+                    }
+                } else {
+                    token = (this.settings.plainToken || '').trim() || null;
+                }
+                if (!token) {
+                    const now = Date.now();
+                    if (!this._lastRenderTokenNoticeAt || (now - this._lastRenderTokenNoticeAt) > 30000) {
+                        this._lastRenderTokenNoticeAt = now;
+                        new import_obsidian.Notice("Token not unlocked/available. Private images render in preview after token is available.", 5000);
+                    }
+                    return;
+                }
             }
 
             const encSeg = (p) => p.split('/').map(encodeURIComponent).join('/');
-            const ref = encodeURIComponent(this.settings.branchName || 'main');
+            const errorSvg = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGNsYXNzPSJsdWNpZGUgbHVjaWRlLWJhbiI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiLz48bGluZSB4MT0iNC45MyIgeTE9IjQuOTMiIHgyPSIxOS4wNyIgeTI9IjE5LjA3Ii8+PC9zdmc+";
+            let showedRawNotice = false;
 
-            const fetchAndSet = async (img) => {
-                const src = img.getAttribute("src");
-                if (!src) return;
-                const imagePath = src.substring("obsidian://notepix/".length);
-                const norm = imagePath.replace(/\\\\/g, "/");
-                if (this.imageCache.has(norm)) {
-                    img.src = this.imageCache.get(norm);
+            const fetchAndSet = async (item) => {
+                const { img, owner, repo, branch, path, type } = item;
+                const cacheKey = `${owner}/${repo}/${branch}/${path}`.replace(/\\\\/g, "/");
+
+                if (this.imageCache.has(cacheKey)) {
+                    img.src = this.imageCache.get(cacheKey);
                     return;
                 }
+
                 try {
-                    const apiUrl = `https://api.github.com/repos/${this.settings.githubUser}/${this.settings.repoName}/contents/${encSeg(norm)}?ref=${ref}`;
+                    const ref = encodeURIComponent(branch);
+                    const norm = path.replace(/\\\\/g, "/");
+                    const apiUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encSeg(norm)}?ref=${ref}`;
+
                     let response = await fetch(apiUrl, {
                         method: "GET",
-                        headers: { "Authorization": `token ${token}`, "Accept": 'application/vnd.github.v3.raw' }
+                        headers: { "Authorization": `token ${token}`, "Accept": "application/vnd.github.v3.raw" }
                     });
+
                     let imageBlob;
                     if (response.ok) {
                         imageBlob = await response.blob();
                     } else {
+                        // Fallback to JSON content API
                         response = await fetch(apiUrl, {
                             method: "GET",
-                            headers: { "Authorization": `token ${token}`, "Accept": 'application/vnd.github.v3+json' }
+                            headers: { "Authorization": `token ${token}`, "Accept": "application/vnd.github.v3+json" }
                         });
                         if (!response.ok) {
-                            console.error(`NotePix: Failed to fetch private image ${norm}. Status: ${response.status}`);
-                            img.src = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGNsYXNzPSJsdWNpZGUgbHVjaWRlLWJhbiI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiLz48bGluZSB4MT0iNC45MyIgeTE9IjQuOTMiIHgyPSIxOS4wNyIgeTI9IjE5LjA3Ii8+PC9zdmc+";
+                            console.error(`NotePix: Failed to fetch image ${cacheKey}. Status: ${response.status}`);
+                            img.src = errorSvg;
                             return;
                         }
                         const meta = await response.json();
@@ -704,25 +981,60 @@ var MyPlugin = class extends import_obsidian.Plugin {
                         for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
                         imageBlob = new Blob([bytes.buffer]);
                     }
+
                     const blobUrl = URL.createObjectURL(imageBlob);
-                    this.imageCache.set(norm, blobUrl);
+                    this.imageCache.set(cacheKey, blobUrl);
                     img.src = blobUrl;
+
+                    // Subtle notice for raw-fallback images (once per session)
+                    if (type === 'raw-fallback' && !showedRawNotice && !this._mismatchNoticeShown) {
+                        this._mismatchNoticeShown = true;
+                        showedRawNotice = true;
+                        new import_obsidian.Notice("Repository is private. Old public images loaded via API in preview.", 5000);
+                    }
                 } catch (e) {
-                    console.error('NotePix: Error processing private image:', e);
+                    console.error('NotePix: Error processing image:', e);
                 }
             };
 
-            // Process current images in parallel
-            await Promise.allSettled(notepixImages.map(img => fetchAndSet(img)));
+            // Process all categorized images in parallel
+            await Promise.allSettled(toProcess.map(item => fetchAndSet(item)));
 
-            // Briefly observe DOM for late-added images and process them
+            // Observe DOM for late-added notepix images
             const observer = new MutationObserver((mutations) => {
                 for (const m of mutations) {
                     for (const node of Array.from(m.addedNodes)) {
                         if (node.nodeType !== 1) continue;
                         const el = node;
-                        const imgs = (el.matches && el.matches('img') ? [el] : Array.from(el.querySelectorAll ? el.querySelectorAll('img') : []));
-                        imgs.filter(i => i.getAttribute('src')?.startsWith('obsidian://notepix/')).forEach(i => { fetchAndSet(i); });
+                        const imgs = (el.matches && el.matches('img') ? [el]
+                            : Array.from(el.querySelectorAll ? el.querySelectorAll('img') : []));
+                        for (const addedImg of imgs) {
+                            const src = addedImg.getAttribute('src');
+                            if (!src || !src.startsWith('obsidian://notepix/')) continue;
+                            const afterPrefix = src.substring("obsidian://notepix/".length);
+                            if (afterPrefix.startsWith("v2/")) {
+                                const parts = afterPrefix.substring(3).split('/');
+                                if (parts.length >= 4) {
+                                    fetchAndSet({
+                                        img: addedImg,
+                                        owner: decodeURIComponent(parts[0]),
+                                        repo: decodeURIComponent(parts[1]),
+                                        branch: decodeURIComponent(parts[2]),
+                                        path: parts.slice(3).map(decodeURIComponent).join('/'),
+                                        type: 'notepix-v2'
+                                    });
+                                }
+                            } else {
+                                fetchAndSet({
+                                    img: addedImg,
+                                    owner: cfgUser,
+                                    repo: cfgRepo,
+                                    branch: this.settings.branchName || 'main',
+                                    path: afterPrefix,
+                                    type: 'notepix-legacy'
+                                });
+                            }
+                        }
                     }
                 }
             });
@@ -1013,21 +1325,25 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
         containerEl.empty();
         new import_obsidian.Setting(containerEl).setName("GitHub username").addText((text) => text.setPlaceholder("your-name").setValue(this.plugin.settings.githubUser).onChange(async (value) => {
             this.plugin.settings.githubUser = value;
+            this.plugin.clearRepoPrivacyCache();
             await this.plugin.saveSettings();
         }));
         new import_obsidian.Setting(containerEl).setName("Repository name").addText((text) => text.setPlaceholder("obsidian-assets").setValue(this.plugin.settings.repoName).onChange(async (value) => {
             this.plugin.settings.repoName = value;
+            this.plugin.clearRepoPrivacyCache();
             await this.plugin.saveSettings();
         }));
         new import_obsidian.Setting(containerEl)
             .setName("Repository visibility")
-            .setDesc("Set this to 'private' if you are using a private repository.")
+            .setDesc("Auto: detects repo type and adapts. Public/Private: forces the chosen mode.")
             .addDropdown(dropdown => dropdown
+                .addOption('auto', 'Auto (Recommended)')
                 .addOption('public', 'Public')
                 .addOption('private', 'Private')
-                .setValue(this.plugin.settings.repoVisibility || 'public')
+                .setValue(this.plugin.settings.repoVisibility || 'auto')
                 .onChange(async (value) => {
                     this.plugin.settings.repoVisibility = value;
+                    this.plugin.clearRepoPrivacyCache();
                     await this.plugin.saveSettings();
                 }));
         new import_obsidian.Setting(containerEl).setName("Branch name").addText((text) => text.setPlaceholder("main").setValue(this.plugin.settings.branchName).onChange(async (value) => {
@@ -1515,6 +1831,7 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                     this.plugin.settings.encryptedToken = encrypted;
                     // Clear plain token for security when switching to encrypted mode
                     this.plugin.settings.plainToken = "";
+                    this.plugin.clearRepoPrivacyCache();
                     await this.plugin.saveSettings();
                     new import_obsidian.Notice("Token has been encrypted and saved!");
                 } catch (e) {
@@ -1532,6 +1849,7 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                     text.setValue(this.plugin.settings.plainToken || "");
                     text.onChange(async (value) => {
                         this.plugin.settings.plainToken = value;
+                        this.plugin.clearRepoPrivacyCache();
                         await this.plugin.saveSettings();
                     });
                 });
@@ -1577,6 +1895,63 @@ var ConfirmationModal = class extends import_obsidian.Modal {
 
     onClose() {
         this.resolve(this.confirmed);
+    }
+}
+
+var RepoMismatchModal = class extends import_obsidian.Modal {
+    constructor(app, repoKey) {
+        super(app);
+        this.repoKey = repoKey;
+        this.choice = null;
+    }
+
+    openAndWait() {
+        return new Promise((resolve) => {
+            this.resolve = resolve;
+            super.open();
+        });
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.createEl("h2", { text: "Repository Privacy Mismatch Detected" });
+        contentEl.createEl("p", {
+            text: `Your repository "${this.repoKey}" appears to be private, but some images in this note use public raw URLs that may not load correctly.`
+        });
+        contentEl.createEl("p", { text: "How would you like NotePix to handle image URLs going forward?" });
+
+        const buttonContainer = contentEl.createDiv({ cls: 'notepix-mismatch-buttons' });
+        buttonContainer.style.display = 'flex';
+        buttonContainer.style.flexDirection = 'column';
+        buttonContainer.style.gap = '8px';
+        buttonContainer.style.marginTop = '12px';
+
+        const makeBtn = (text, desc, choice, cta) => {
+            const wrapper = buttonContainer.createDiv();
+            const btn = wrapper.createEl('button', { text, cls: cta ? 'mod-cta' : '' });
+            btn.style.width = '100%';
+            btn.style.textAlign = 'left';
+            btn.style.padding = '8px 12px';
+            if (desc) {
+                const descEl = wrapper.createEl('small', { text: desc });
+                descEl.style.display = 'block';
+                descEl.style.opacity = '0.7';
+                descEl.style.marginTop = '2px';
+                descEl.style.marginLeft = '12px';
+            }
+            btn.onclick = () => {
+                this.choice = choice;
+                this.close();
+            };
+        };
+
+        makeBtn("Use Auto Mode", "Detects repo type and adapts automatically. Recommended.", "auto", true);
+        makeBtn("Switch to Private", "All future uploads will use the private image format.", "private", false);
+        makeBtn("Keep Public", "No change. Raw URLs may not load for private repos.", "public", false);
+    }
+
+    onClose() {
+        if (this.resolve) this.resolve(this.choice);
     }
 }
 

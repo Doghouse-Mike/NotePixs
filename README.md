@@ -3,7 +3,7 @@
 [![Built for Obsidian](https://img.shields.io/badge/Built%20for-Obsidian-7B68EE.svg?style=for-the-badge)](https://obsidian.md)
 [![Release Version](https://img.shields.io/github/v/release/AyushParkara/NotePix?style=for-the-badge&sort=semver)](https://github.com/AyushParkara/NotePix/releases/)
 
-NotePix automatically uploads images, screenshots, and other assets from your Obsidian vault to a designated GitHub repository. It then seamlessly replaces the local link with a GitHub-hosted URL for public repos, or a secure internal link for private repos, keeping your vault lightweight and portable.
+NotePix automatically uploads images, screenshots, and other assets from your Obsidian vault to a designated GitHub repository. It then replaces local links with either a GitHub-hosted URL or a secure internal private link, with smart Auto/Public/Private mode handling.
 
 ![NotePix Demo GIF](https://raw.githubusercontent.com/AyushParkara/NotePix/main/assets/notepix-demo.gif)
 
@@ -11,6 +11,10 @@ NotePix automatically uploads images, screenshots, and other assets from your Ob
 
 -   **Seamless Automation**: Just paste or drag an image into a note. NotePix handles the rest.
 -   **Private Repository Support**: Securely store your images in a private GitHub repository. NotePix fetches and displays them on-the-fly in Reading View.
+-   **Repo Mode Intelligence**: Use **Auto (Recommended)** to detect repo privacy and choose the correct link format automatically.
+-   **Mismatch Prompt (3 Options)**: If your repo is private but notes contain public raw links, NotePix prompts: **Use Auto Mode**, **Switch to Private**, or **Keep Public**.
+-   **Private Raw-Link Fallback**: Existing `raw.githubusercontent.com` links for your configured repo can still render in preview when the repo is private.
+-   **Self-Describing Private Links**: New private links include repo context (`owner/repo/branch/path`) so they remain resolvable even if you change repository settings later.
 -   **Smart Hover Detection**: Password prompts only appear in main document views. Hover previews and page previews work seamlessly without interrupting your workflow.
 -   **Secure Token Storage**: Your GitHub Personal Access Token (PAT) is **never** stored in plain text. It is encrypted using AES-GCM, and you are prompted for a master password to decrypt it once per session.
 -   **GitHub-Hosted Links**: For public repositories, NotePix uses direct GitHub links to serve images.
@@ -21,21 +25,33 @@ NotePix automatically uploads images, screenshots, and other assets from your Ob
 
 ## ⚙️ How it Works
 
-The process differs slightly depending on whether your repository is public or private.
+### Repository visibility modes
 
-#### For Public Repositories:
-1.  **Paste an Image**: When you paste an image, Obsidian creates a local file.
-2.  **Automatic Upload**: NotePix detects this new file and uploads it to your configured **public** GitHub repository.
-3.  **Link Replacement**: The local `![[image.png]]` embed is automatically replaced with a public GitHub markdown link `![](https://raw.githubusercontent.com/...)`. This link works everywhere.
+#### Auto (Recommended)
+1. On upload, NotePix checks repo privacy (cached for 10 minutes).
+2. If repo is public → inserts `https://raw.githubusercontent.com/...`.
+3. If repo is private → inserts private internal link in v2 format, e.g. `![](obsidian://notepix/v2/<owner>/<repo>/<branch>/<path>)`.
 
-#### For Private Repositories:
-1.  **Paste an Image**: The upload process is identical. The image is uploaded to your **private** GitHub repository.
-2.  **Link Replacement**: The local link is replaced with a special internal link, like `![](obsidian://notepix/assets/image.png)`.
-3.  **Editor View**: This special link will appear **broken** in Live Preview or Source Mode, as the editor cannot access private files.
-4.  **Reading View**: When you switch to **Reading View**, NotePix intercepts this link, uses your secure token to fetch the image directly from your private repo, and displays it seamlessly.
-5.  **Hover Previews**: When you hover over links to notes with private images, the images load automatically without password prompts, using your cached session token.
+#### Public
+- Uploads always insert raw GitHub URLs.
+- If the configured repo is actually private, those URLs may fail in editor/browser contexts, but NotePix can still render matching existing raw links in preview via authenticated API fetch.
 
-If encryption is enabled, the plugin will prompt you for your master password **once per session** when you first open a note with private images. After that, all subsequent views (including hover previews and page previews) will use the cached token without any prompts.
+#### Private
+- Uploads always insert private internal links.
+- Private links are fetched and rendered in Reading/Preview contexts using your token.
+
+### Existing links and mismatch handling
+- If repo appears private while notes contain matching raw links, NotePix can show a 3-button mismatch modal:
+	- **Use Auto Mode**
+	- **Switch to Private**
+	- **Keep Public**
+- Prompt suppression is applied per repo with a cooldown window to avoid repeated interruptions.
+
+### Editor vs Reading View
+- Private images are rendered in Reading/Preview contexts through authenticated API fetch.
+- In Source/Live Preview text editing, the markdown editor itself cannot directly render authenticated private URL fetches in the same way.
+
+If encryption is enabled, the plugin prompts for master password when token unlock is needed. After successful decrypt, the token is cached for the session.
 
 ## 🚀 Setup Guide
 
@@ -72,7 +88,7 @@ NotePix needs a token to be able to upload files to your repository.
 | :--- | :--- | :--- |
 | **GitHub Username** | Your GitHub username (case-sensitive). | `AyushParkara` |
 | **Repository Name** | The name of the repository you created in Step 1. | `obsidian-assets` |
-| **Repository Visibility** | Choose 'Public' for GitHub-hosted links or 'Private' for secure, on-the-fly image loading. | `Public` / `Private` |
+| **Repository Visibility** | **Auto (Recommended)** detects privacy and picks the correct link format. Public/Private force behavior. | `Auto` / `Public` / `Private` |
 | **Branch Name** | The branch to upload files to. | `main` or `master` |
 | **Folder Path in Repository** | The directory inside your repo to store images. A `/` is added automatically. | `assets/` |
 | **Delete Local File** | If enabled, the original image file is deleted from your vault after a successful upload. | `true` / `false` |
