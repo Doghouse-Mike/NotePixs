@@ -98,6 +98,7 @@ var DEFAULT_SETTINGS = {
     deleteLocal: false,
     useEncryption: true,
     repoVisibility: 'auto',
+    repoHistory: [],
     uploadOnPaste: 'always',
     localImageFolder: 'notepix-local',
     uploadImageFolder: 'notepix-uploads',
@@ -130,6 +131,11 @@ var MyPlugin = class extends import_obsidian.Plugin {
         this._mismatchNoticeShown = false;
         this._lastRenderTokenNoticeAt = 0;
         this.failedImageFetches = new Map();
+        this.pendingLegacyMigrations = new Map();
+        this.pendingLegacyMigrationTimers = new Map();
+        this.repoListCache = null;
+        this.legacyResolvedRepoByKey = new Map();
+        this.legacyUnresolvedUntil = new Map();
     }
     getVaultFolderPaths() {
         const res = [];
@@ -149,6 +155,164 @@ var MyPlugin = class extends import_obsidian.Plugin {
     }
     normalizeVaultPath(path) {
         return (path || '').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
+    }
+    getLegacyRepoCandidates(primaryRepo) {
+        const normalizedPrimary = (primaryRepo || '').trim();
+        const history = Array.isArray(this.settings.repoHistory) ? this.settings.repoHistory : [];
+        const set = new Set();
+
+        if (normalizedPrimary) set.add(normalizedPrimary);
+
+        for (const entry of history) {
+            const repo = String(entry || '').trim();
+            if (repo) set.add(repo);
+        }
+
+        // Heuristic fallback for common rename pattern: singular <-> plural.
+        if (normalizedPrimary) {
+            if (normalizedPrimary.endsWith('s') && normalizedPrimary.length > 1) {
+                set.add(normalizedPrimary.slice(0, -1));
+            } else {
+                set.add(`${normalizedPrimary}s`);
+            }
+        }
+
+        return Array.from(set.values());
+    }
+    clearRepoListCache() {
+        this.repoListCache = null;
+        if (this.legacyResolvedRepoByKey) {
+            this.legacyResolvedRepoByKey.clear();
+        }
+        if (this.legacyUnresolvedUntil) {
+            this.legacyUnresolvedUntil.clear();
+        }
+    }
+    async getConfiguredUserRepoList(token) {
+        const configuredUser = (this.settings.githubUser || '').trim();
+        if (!configuredUser || !token) return [];
+
+        if (this.repoListCache &&
+            this.repoListCache.user === configuredUser &&
+            (Date.now() - this.repoListCache.timestamp) < 10 * 60 * 1000) {
+            return this.repoListCache.repos || [];
+        }
+
+        try {
+            const collected = [];
+            const userLower = configuredUser.toLowerCase();
+            for (let page = 1; page <= 10; page++) {
+                const url = `https://api.github.com/user/repos?per_page=100&page=${page}&sort=updated&direction=desc&type=all&affiliation=owner,collaborator,organization_member`;
+                const response = await fetch(url, {
+                    headers: {
+                        "Authorization": `token ${token}`,
+                        "Accept": "application/vnd.github.v3+json"
+                    }
+                });
+                if (!response.ok) break;
+                const arr = await response.json();
+                if (!Array.isArray(arr) || arr.length === 0) break;
+
+                for (const repo of arr) {
+                    const ownerLogin = String(repo?.owner?.login || '').toLowerCase();
+                    const name = String(repo?.name || '').trim();
+                    if (name && ownerLogin === userLower) {
+                        collected.push(name);
+                    }
+                }
+                if (arr.length < 100) break;
+            }
+
+            const unique = Array.from(new Set(collected));
+            this.repoListCache = {
+                user: configuredUser,
+                repos: unique,
+                timestamp: Date.now()
+            };
+            return unique;
+        } catch (e) {
+            console.error('NotePix: Failed to fetch repo list for configured user', e);
+            return [];
+        }
+    }
+    queueLegacyLinkMigration(sourcePath, oldUrl, newUrl) {
+        const path = (sourcePath || '').trim();
+        if (!path || !oldUrl || !newUrl || oldUrl === newUrl) return;
+
+        let map = this.pendingLegacyMigrations.get(path);
+        if (!map) {
+            map = new Map();
+            this.pendingLegacyMigrations.set(path, map);
+        }
+        map.set(oldUrl, newUrl);
+
+        const existing = this.pendingLegacyMigrationTimers.get(path);
+        if (existing) {
+            clearTimeout(existing);
+        }
+
+        const timer = setTimeout(() => {
+            this.applyLegacyLinkMigrations(path);
+        }, 800);
+        this.pendingLegacyMigrationTimers.set(path, timer);
+    }
+    async applyLegacyLinkMigrations(sourcePath) {
+        const path = (sourcePath || '').trim();
+        if (!path) return;
+
+        const timer = this.pendingLegacyMigrationTimers.get(path);
+        if (timer) {
+            clearTimeout(timer);
+            this.pendingLegacyMigrationTimers.delete(path);
+        }
+
+        const migrations = this.pendingLegacyMigrations.get(path);
+        if (!migrations || migrations.size === 0) return;
+        this.pendingLegacyMigrations.delete(path);
+
+        try {
+            const abs = this.app.vault.getAbstractFileByPath(path);
+            if (!(abs instanceof import_obsidian.TFile) || !abs.path.endsWith('.md')) return;
+            const startMtime = abs.stat?.mtime || 0;
+
+            const content = await this.app.vault.read(abs);
+            let updated = content;
+            let replacedCount = 0;
+
+            for (const [oldUrl, newUrl] of migrations.entries()) {
+                if (!oldUrl || !newUrl || oldUrl === newUrl) continue;
+                if (!updated.includes(oldUrl)) continue;
+                updated = updated.split(oldUrl).join(newUrl);
+                replacedCount++;
+            }
+
+            if (updated !== content) {
+                const latest = this.app.vault.getAbstractFileByPath(path);
+                const latestMtime = (latest instanceof import_obsidian.TFile) ? (latest.stat?.mtime || 0) : 0;
+                if (startMtime && latestMtime && latestMtime !== startMtime) {
+                    // File changed while migration was preparing; requeue to avoid clobbering newer edits.
+                    let map = this.pendingLegacyMigrations.get(path);
+                    if (!map) {
+                        map = new Map();
+                        this.pendingLegacyMigrations.set(path, map);
+                    }
+                    for (const [oldUrl, newUrl] of migrations.entries()) {
+                        map.set(oldUrl, newUrl);
+                    }
+                    if (!this.pendingLegacyMigrationTimers.get(path)) {
+                        const retryTimer = setTimeout(() => {
+                            this.applyLegacyLinkMigrations(path);
+                        }, 1200);
+                        this.pendingLegacyMigrationTimers.set(path, retryTimer);
+                    }
+                    return;
+                }
+                await this.app.vault.modify(abs, updated);
+                new import_obsidian.Notice(`NotePix: Migrated ${replacedCount} legacy image link(s) to v2 format.`, 3500);
+            }
+        } catch (e) {
+            console.error('NotePix: Failed to migrate legacy links', e);
+        }
     }
     markFileAsUserApproved(path) {
         const norm = this.normalizeVaultPath(path);
@@ -268,9 +432,10 @@ var MyPlugin = class extends import_obsidian.Plugin {
         const activeLeaf = this.app.workspace.activeLeaf;
         if (activeLeaf) attachHandler(activeLeaf);
     }
-    recordPendingLinkPlaceholder(path, placeholderText) {
+    recordPendingLinkPlaceholder(path, placeholderText, sourcePath = "") {
         const norm = this.normalizeVaultPath(path);
         if (!norm || !placeholderText) return;
+        const sourcePathNorm = this.normalizeVaultPath(sourcePath || "");
         const entry = this.pendingLinkReplacements.get(norm);
         if (entry?.timeoutId) {
             clearTimeout(entry.timeoutId);
@@ -278,7 +443,19 @@ var MyPlugin = class extends import_obsidian.Plugin {
         const timeoutId = setTimeout(() => {
             this.pendingLinkReplacements.delete(norm);
         }, 5 * 60 * 1e3);
-        this.pendingLinkReplacements.set(norm, { placeholderText, timeoutId });
+        this.pendingLinkReplacements.set(norm, { placeholderText, sourcePath: sourcePathNorm, timeoutId });
+    }
+    peekPendingLinkPlaceholder(pathOrKey) {
+        const norm = this.normalizeVaultPath(pathOrKey);
+        const key = norm || pathOrKey;
+        if (!key) return null;
+        const entry = this.pendingLinkReplacements.get(key);
+        if (!entry) return null;
+        return {
+            key,
+            placeholderText: entry.placeholderText || null,
+            sourcePath: entry.sourcePath || ""
+        };
     }
     consumePendingLinkPlaceholder(pathOrKey) {
         const norm = this.normalizeVaultPath(pathOrKey);
@@ -290,7 +467,11 @@ var MyPlugin = class extends import_obsidian.Plugin {
             clearTimeout(entry.timeoutId);
         }
         this.pendingLinkReplacements.delete(key);
-        return entry.placeholderText || null;
+        return {
+            key,
+            placeholderText: entry.placeholderText || null,
+            sourcePath: entry.sourcePath || ""
+        };
     }
     async promptUploadConfirmation(file) {
         const modal = new ConfirmationModal(this.app, "Upload Image?", `Do you want to upload ${file.name} to GitHub?`);
@@ -426,6 +607,20 @@ var MyPlugin = class extends import_obsidian.Plugin {
         if (this.failedImageFetches) {
             this.failedImageFetches.clear();
         }
+        if (this.pendingLegacyMigrationTimers) {
+            this.pendingLegacyMigrationTimers.forEach((timer) => clearTimeout(timer));
+            this.pendingLegacyMigrationTimers.clear();
+        }
+        if (this.pendingLegacyMigrations) {
+            this.pendingLegacyMigrations.clear();
+        }
+        this.repoListCache = null;
+        if (this.legacyResolvedRepoByKey) {
+            this.legacyResolvedRepoByKey.clear();
+        }
+        if (this.legacyUnresolvedUntil) {
+            this.legacyUnresolvedUntil.clear();
+        }
     }
     async handlePaste(evt) {
         const files = evt.clipboardData?.files;
@@ -511,8 +706,9 @@ var MyPlugin = class extends import_obsidian.Plugin {
 
         // Record a simple placeholder keyed by file path and file name
         const placeholderText = `![[${newFile.name}]]`;
-        this.recordPendingLinkPlaceholder(newFile.path, placeholderText);
-        this.recordPendingLinkPlaceholder(newFile.name, placeholderText);
+        const sourcePath = activeView.file?.path || "";
+        this.recordPendingLinkPlaceholder(newFile.path, placeholderText, sourcePath);
+        this.recordPendingLinkPlaceholder(newFile.name, placeholderText, sourcePath);
 
         // Insert a temporary wikilink to the local file so the eventual upload can replace it with the final URL
         activeView.editor.replaceSelection(placeholderText);
@@ -984,7 +1180,9 @@ var MyPlugin = class extends import_obsidian.Plugin {
                             img,
                             owner: cfgUser,
                             repo: cfgRepo,
+                            fallbackRepos: this.getLegacyRepoCandidates(cfgRepo),
                             branch: this.settings.branchName || 'main',
+                            legacySrc: src,
                             // Legacy links can carry encoded segments (e.g. %20); decode once
                             // so API path encoding below does not double-encode.
                             path: decodePathSafely(afterPrefix),
@@ -1073,77 +1271,140 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 }
             }
 
+            let configuredUserRepos = [];
+            const hasLegacyLinks = toProcess.some(item => item?.type === 'notepix-legacy');
+            if (hasLegacyLinks && cfgUser && token) {
+                configuredUserRepos = await this.getConfiguredUserRepoList(token);
+            }
+
             const encSeg = (p) => p.split('/').map(encodeURIComponent).join('/');
             const errorSvg = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGNsYXNzPSJsdWNpZGUgbHVjaWRlLWJhbiI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiLz48bGluZSB4MT0iNC45MyIgeTE9IjQuOTMiIHgyPSIxOS4wNyIgeTI9IjE5LjA3Ii8+PC9zdmc+";
             let showedRawNotice = false;
 
             const fetchAndSet = async (item) => {
                 const { img, owner, repo, branch, path, type } = item;
-                const cacheKey = `${owner}/${repo}/${branch}/${path}`.replace(/\\\\/g, "/");
-                const now = Date.now();
-                const failTs = this.failedImageFetches.get(cacheKey) || 0;
-                if (failTs && (now - failTs) < 30 * 1000) {
-                    img.src = errorSvg;
-                    return;
+                let repoCandidates = [repo];
+                if (type === 'notepix-legacy') {
+                    const staticCandidates = Array.isArray(item.fallbackRepos) ? item.fallbackRepos : [];
+                    const dynamicCandidates = Array.isArray(configuredUserRepos) ? configuredUserRepos : [];
+                    const legacyKey = `${owner}|${branch}|${path}`;
+                    const unresolvedUntil = this.legacyUnresolvedUntil.get(legacyKey) || 0;
+                    if (Date.now() < unresolvedUntil) {
+                        img.src = errorSvg;
+                        return;
+                    }
+                    const resolvedRepo = this.legacyResolvedRepoByKey.get(legacyKey);
+                    const ordered = [];
+                    if (resolvedRepo) ordered.push(resolvedRepo);
+                    ordered.push(...staticCandidates, ...dynamicCandidates);
+                    repoCandidates = Array.from(new Set(ordered.filter(Boolean)));
+                    if (repoCandidates.length === 0 && repo) repoCandidates = [repo];
+                    // Hard cap to avoid excessive candidate scanning on very large accounts.
+                    if (repoCandidates.length > 25) {
+                        repoCandidates = repoCandidates.slice(0, 25);
+                    }
                 }
 
-                if (this.imageCache.has(cacheKey)) {
-                    img.src = this.imageCache.get(cacheKey);
-                    return;
-                }
+                const ref = encodeURIComponent(branch);
+                const norm = path.replace(/\\\\/g, "/");
 
-                try {
-                    const ref = encodeURIComponent(branch);
-                    const norm = path.replace(/\\\\/g, "/");
-                    const apiUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encSeg(norm)}?ref=${ref}`;
+                const tryRepo = async (repoCandidate) => {
+                    const cacheKey = `${owner}/${repoCandidate}/${branch}/${path}`.replace(/\\\\/g, "/");
+                    const now = Date.now();
+                    const failTs = this.failedImageFetches.get(cacheKey) || 0;
+                    if (failTs && (now - failTs) < 30 * 1000) {
+                        return null;
+                    }
 
-                    let response = await fetch(apiUrl, {
-                        method: "GET",
-                        headers: { "Authorization": `token ${token}`, "Accept": "application/vnd.github.v3.raw" }
-                    });
+                    if (this.imageCache.has(cacheKey)) {
+                        img.src = this.imageCache.get(cacheKey);
+                        return repoCandidate;
+                    }
 
-                    let imageBlob;
-                    if (response.ok) {
-                        imageBlob = await response.blob();
-                    } else {
-                        // Fallback to JSON content API
-                        response = await fetch(apiUrl, {
+                    const apiUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoCandidate)}/contents/${encSeg(norm)}?ref=${ref}`;
+
+                    try {
+                        let response = await fetch(apiUrl, {
                             method: "GET",
-                            headers: { "Authorization": `token ${token}`, "Accept": "application/vnd.github.v3+json" }
+                            headers: { "Authorization": `token ${token}`, "Accept": "application/vnd.github.v3.raw" }
                         });
-                        if (!response.ok) {
-                            this.failedImageFetches.set(cacheKey, Date.now());
-                            console.error(`NotePix: Failed to fetch image ${cacheKey}. Status: ${response.status}`);
-                            img.src = errorSvg;
-                            return;
-                        }
-                        const meta = await response.json();
-                        if (!meta || !meta.content) {
-                            this.failedImageFetches.set(cacheKey, Date.now());
-                            img.src = errorSvg;
-                            return;
-                        }
-                        const raw = atob(meta.content.replace(/\n/g, ''));
-                        const bytes = new Uint8Array(raw.length);
-                        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-                        imageBlob = new Blob([bytes.buffer]);
-                    }
 
-                    const blobUrl = URL.createObjectURL(imageBlob);
-                    this.imageCache.set(cacheKey, blobUrl);
-                    this.failedImageFetches.delete(cacheKey);
-                    img.src = blobUrl;
+                        let imageBlob;
+                        if (response.ok) {
+                            imageBlob = await response.blob();
+                        } else {
+                            // Fallback to JSON content API
+                            response = await fetch(apiUrl, {
+                                method: "GET",
+                                headers: { "Authorization": `token ${token}`, "Accept": "application/vnd.github.v3+json" }
+                            });
+                            if (!response.ok) {
+                                this.failedImageFetches.set(cacheKey, Date.now());
+                                return null;
+                            }
+                            const meta = await response.json();
+                            if (!meta || !meta.content) {
+                                this.failedImageFetches.set(cacheKey, Date.now());
+                                return null;
+                            }
+                            const raw = atob(meta.content.replace(/\n/g, ''));
+                            const bytes = new Uint8Array(raw.length);
+                            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+                            imageBlob = new Blob([bytes.buffer]);
+                        }
 
-                    // Subtle notice for raw-fallback images (once per session)
-                    if (type === 'raw-fallback' && !showedRawNotice && !this._mismatchNoticeShown) {
-                        this._mismatchNoticeShown = true;
-                        showedRawNotice = true;
-                        new import_obsidian.Notice("Repository is private. Old public images loaded via API in preview.", 5000);
+                        const blobUrl = URL.createObjectURL(imageBlob);
+                        this.imageCache.set(cacheKey, blobUrl);
+                        this.failedImageFetches.delete(cacheKey);
+                        img.src = blobUrl;
+                        return repoCandidate;
+                    } catch (_) {
+                        this.failedImageFetches.set(cacheKey, Date.now());
+                        return null;
                     }
-                } catch (e) {
-                    this.failedImageFetches.set(cacheKey, Date.now());
+                };
+
+                let resolvedRepo = null;
+                for (const repoCandidate of repoCandidates) {
+                    if (!repoCandidate) continue;
+                    resolvedRepo = await tryRepo(repoCandidate);
+                    if (resolvedRepo) break;
+                }
+
+                if (!resolvedRepo) {
+                    if (type === 'notepix-legacy') {
+                        const legacyKey = `${owner}|${branch}|${path}`;
+                        this.legacyUnresolvedUntil.set(legacyKey, Date.now() + 5 * 60 * 1000);
+                    }
                     img.src = errorSvg;
-                    console.error('NotePix: Error processing image:', e);
+                    console.error(`NotePix: Failed to fetch image ${owner}/${repo}/${branch}/${path} from candidate repos.`);
+                    return;
+                }
+
+                if (type === 'notepix-legacy') {
+                    const legacyKey = `${owner}|${branch}|${path}`;
+                    this.legacyResolvedRepoByKey.set(legacyKey, resolvedRepo);
+                    this.legacyUnresolvedUntil.delete(legacyKey);
+                }
+
+                // Migrate legacy links only after a successful, concrete resolution.
+                // No guessing: we only rewrite when an exact source path resolves from a known repo.
+                if (type === 'notepix-legacy' && item.legacySrc && context?.sourcePath) {
+                    const encOwner = encodeURIComponent(owner || '');
+                    const encRepo = encodeURIComponent(resolvedRepo || '');
+                    const encBranch = encodeURIComponent(branch || 'main');
+                    const encPath = String(path || '').split('/').map(encodeURIComponent).join('/');
+                    if (encOwner && encRepo && encBranch && encPath) {
+                        const v2Url = `obsidian://notepix/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
+                        this.queueLegacyLinkMigration(context.sourcePath, item.legacySrc, v2Url);
+                    }
+                }
+
+                // Subtle notice for raw-fallback images (once per session)
+                if (type === 'raw-fallback' && !showedRawNotice && !this._mismatchNoticeShown) {
+                    this._mismatchNoticeShown = true;
+                    showedRawNotice = true;
+                    new import_obsidian.Notice("Repository is private. Old public images loaded via API in preview.", 5000);
                 }
             };
 
@@ -1209,117 +1470,157 @@ var MyPlugin = class extends import_obsidian.Plugin {
             : (replacementType === 'raw' ? `${replacementTarget}` : `![](${replacementTarget})`);
 
         return new Promise((resolve) => {
-            setTimeout(() => {
-                const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-                if (!activeView) {
-                    console.error("NotePix: No active editor to replace link.");
-                    return resolve(false);
-                }
-                const editor = activeView.editor;
-                if (!editor) return resolve(false);
-
-                const doc = (typeof editor.getDoc === 'function') ? editor.getDoc() : null;
-                let content = '';
-                if (doc?.getValue) {
-                    try { content = doc.getValue(); } catch (_) { content = ''; }
-                }
-                if (!content && typeof editor.getValue === 'function') {
-                    try { content = editor.getValue(); } catch (_) { content = ''; }
-                }
-                if (!content) return resolve(false);
-
-                // Normalize malformed content that can appear from partial replacements:
-                // ![198]([obsidian://notepix/assets](obsidian://notepix/v2/.../assets)/file.png)
-                // -> ![198](obsidian://notepix/v2/.../assets/file.png)
-                const malformedNestedLink = /!\[([^\]]*)\]\(\[obsidian:\/\/notepix\/[^\]]*\]\((obsidian:\/\/notepix\/v2\/[^)]+)\)\/([^)]+)\)/g;
-                let normalizedContent = content.replace(malformedNestedLink, (_m, alt, base, tail) => {
-                    const cleanedBase = String(base || '').replace(/\/+$/, '');
-                    const cleanedTail = String(tail || '').replace(/^\/+/, '');
-                    return `![${alt || ''}](${cleanedBase}/${cleanedTail})`;
-                });
-
-                const escapedFileName = fileName.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+            setTimeout(async () => {
                 const normalizedPath = this.normalizeVaultPath(originalPath);
-                const escapedPath = normalizedPath ? normalizedPath.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") : null;
+                const pendingByPath = this.peekPendingLinkPlaceholder(normalizedPath || fileName);
+                const pendingByName = this.peekPendingLinkPlaceholder(fileName);
+                const pendingEntry = pendingByPath || pendingByName;
+                const sourcePathHint = this.normalizeVaultPath(options?.sourcePath || pendingEntry?.sourcePath || "");
 
-                const replaceLastRegexMatch = (source, regex, replacement) => {
-                    const flags = regex.flags.includes('g') ? regex.flags : `${regex.flags}g`;
-                    const globalRegex = new RegExp(regex.source, flags);
-                    let match;
-                    let lastMatch = null;
-                    while ((match = globalRegex.exec(source)) !== null) {
-                        lastMatch = { index: match.index, text: match[0] };
-                        if (match[0].length === 0) {
-                            globalRegex.lastIndex += 1;
+                const buildReplacedContent = (content) => {
+                    if (!content) return { replaced: false, newContent: content };
+
+                    // Normalize malformed content that can appear from partial replacements:
+                    // ![198]([obsidian://notepix/assets](obsidian://notepix/v2/.../assets)/file.png)
+                    // -> ![198](obsidian://notepix/v2/.../assets/file.png)
+                    const malformedNestedLink = /!\[([^\]]*)\]\(\[obsidian:\/\/notepix\/[^\]]*\]\((obsidian:\/\/notepix\/v2\/[^)]+)\)\/([^)]+)\)/g;
+                    let normalizedContent = content.replace(malformedNestedLink, (_m, alt, base, tail) => {
+                        const cleanedBase = String(base || '').replace(/\/+$/, '');
+                        const cleanedTail = String(tail || '').replace(/^\/+/, '');
+                        return `![${alt || ''}](${cleanedBase}/${cleanedTail})`;
+                    });
+
+                    const escapedFileName = fileName.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+                    const escapedPath = normalizedPath ? normalizedPath.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&") : null;
+
+                    const replaceLastRegexMatch = (source, regex, replacement) => {
+                        const flags = regex.flags.includes('g') ? regex.flags : `${regex.flags}g`;
+                        const globalRegex = new RegExp(regex.source, flags);
+                        let match;
+                        let lastMatch = null;
+                        while ((match = globalRegex.exec(source)) !== null) {
+                            lastMatch = { index: match.index, text: match[0] };
+                            if (match[0].length === 0) {
+                                globalRegex.lastIndex += 1;
+                            }
+                        }
+                        if (!lastMatch) {
+                            return { replaced: false, value: source };
+                        }
+                        const before = source.slice(0, lastMatch.index);
+                        const after = source.slice(lastMatch.index + lastMatch.text.length);
+                        return { replaced: true, value: `${before}${replacement}${after}` };
+                    };
+
+                    const patterns = [];
+                    // Wikilink by filename (Android attachments: ![[Screenshot_....jpg]])
+                    patterns.push(new RegExp(`!\\[\\[(?:[^\\]|]*?/)*${escapedFileName}(?:\\|[^\\]]*)?\\]\\]`));
+                    // Wikilink by normalized path if available
+                    if (escapedPath) {
+                        patterns.push(new RegExp(`!\\[\\[(?:[^\\]|]*?/)*${escapedPath}(?:\\|[^\\]]*)?\\]\\]`));
+                    }
+                    // Markdown image links by filename
+                    patterns.push(new RegExp(`!\\[[^\\]]*\\]\\([^\\)]*${escapedFileName}[^\\)]*\\)`));
+                    patterns.push(new RegExp(`!\\[[^\\]]*\\]\\([^\\)]*${encodeURIComponent(fileName)}[^\\)]*\\)`));
+                    if (escapedPath) {
+                        patterns.push(new RegExp(`!\\[[^\\]]*\\]\\([^\\)]*${escapedPath}[^\\)]*\\)`));
+                        patterns.push(new RegExp(`!\\[[^\\]]*\\]\\([^\\)]*${encodeURIComponent(normalizedPath)}[^\\)]*\\)`));
+                    }
+
+                    let replaced = false;
+                    let newContent = normalizedContent;
+
+                    // First preference: replace the exact pending placeholder captured for this file.
+                    // This is the most deterministic option when filenames repeat in the same note.
+                    const fallbackPlaceholder = pendingEntry?.placeholderText || null;
+                    if (fallbackPlaceholder && newContent.includes(fallbackPlaceholder)) {
+                        const idx = newContent.lastIndexOf(fallbackPlaceholder);
+                        if (idx >= 0) {
+                            replaced = true;
+                            newContent = `${newContent.slice(0, idx)}${replacementText}${newContent.slice(idx + fallbackPlaceholder.length)}`;
                         }
                     }
-                    if (!lastMatch) {
-                        return { replaced: false, value: source };
+
+                    for (const regex of patterns) {
+                        if (replaced) break;
+                        if (!regex) continue;
+                        const result = replaceLastRegexMatch(newContent, regex, replacementText);
+                        replaced = result.replaced;
+                        newContent = result.value;
                     }
-                    const before = source.slice(0, lastMatch.index);
-                    const after = source.slice(lastMatch.index + lastMatch.text.length);
-                    return { replaced: true, value: `${before}${replacement}${after}` };
+
+                    // If normalization changed content, persist it even when no direct replacement was needed.
+                    if (!replaced && newContent !== content) {
+                        replaced = true;
+                    }
+
+                    return { replaced, newContent };
                 };
 
-                const patterns = [];
-                // Wikilink by filename (Android attachments: ![[Screenshot_....jpg]])
-                patterns.push(new RegExp(`!\\[\\[(?:[^\\]|]*?/)*${escapedFileName}(?:\\|[^\\]]*)?\\]\\]`));
-                // Wikilink by normalized path if available
-                if (escapedPath) {
-                    patterns.push(new RegExp(`!\\[\\[(?:[^\\]|]*?/)*${escapedPath}(?:\\|[^\\]]*)?\\]\\]`));
-                }
-                // Markdown image links by filename
-                patterns.push(new RegExp(`!\\[[^\\]]*\\]\\([^\\)]*${escapedFileName}[^\\)]*\\)`));
-                patterns.push(new RegExp(`!\\[[^\\]]*\\]\\([^\\)]*${encodeURIComponent(fileName)}[^\\)]*\\)`));
-                if (escapedPath) {
-                    patterns.push(new RegExp(`!\\[[^\\]]*\\]\\([^\\)]*${escapedPath}[^\\)]*\\)`));
-                    patterns.push(new RegExp(`!\\[[^\\]]*\\]\\([^\\)]*${encodeURIComponent(normalizedPath)}[^\\)]*\\)`));
-                }
+                const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+                const activeFilePath = this.normalizeVaultPath(activeView?.file?.path || "");
+                const canUseActiveEditor = !!(activeView && activeView.editor && (!sourcePathHint || sourcePathHint === activeFilePath));
 
-                let replaced = false;
-                let newContent = normalizedContent;
+                if (canUseActiveEditor) {
+                    const editor = activeView.editor;
+                    const doc = (typeof editor.getDoc === 'function') ? editor.getDoc() : null;
+                    let content = '';
+                    if (doc?.getValue) {
+                        try { content = doc.getValue(); } catch (_) { content = ''; }
+                    }
+                    if (!content && typeof editor.getValue === 'function') {
+                        try { content = editor.getValue(); } catch (_) { content = ''; }
+                    }
 
-                // First preference: replace the exact pending placeholder captured for this file.
-                // This is the most deterministic option when filenames repeat in the same note.
-                const fallbackPlaceholder = this.consumePendingLinkPlaceholder(normalizedPath || fileName) || this.consumePendingLinkPlaceholder(fileName);
-                if (fallbackPlaceholder && newContent.includes(fallbackPlaceholder)) {
-                    const idx = newContent.lastIndexOf(fallbackPlaceholder);
-                    if (idx >= 0) {
-                        replaced = true;
-                        newContent = `${newContent.slice(0, idx)}${replacementText}${newContent.slice(idx + fallbackPlaceholder.length)}`;
+                    const result = buildReplacedContent(content);
+                    if (result.replaced) {
+                        const cursor = (typeof editor.getCursor === 'function') ? editor.getCursor() : null;
+                        let wrote = false;
+                        if (doc?.setValue) {
+                            try { doc.setValue(result.newContent); wrote = true; } catch (_) { wrote = false; }
+                        }
+                        if (!wrote && typeof editor.setValue === 'function') {
+                            try { editor.setValue(result.newContent); wrote = true; } catch (_) { wrote = false; }
+                        }
+                        if (cursor && typeof editor.setCursor === 'function') {
+                            try { editor.setCursor(cursor); } catch (_) { }
+                        }
+                        if (wrote) {
+                            if (pendingByPath) this.consumePendingLinkPlaceholder(pendingByPath.key);
+                            if (pendingByName) this.consumePendingLinkPlaceholder(pendingByName.key);
+                            return resolve(true);
+                        }
                     }
                 }
 
-                for (const regex of patterns) {
-                    if (replaced) break;
-                    if (!regex) continue;
-                    const result = replaceLastRegexMatch(newContent, regex, replacementText);
-                    replaced = result.replaced;
-                    newContent = result.value;
+                // Fallback: apply replacement directly to the source note file if known.
+                if (sourcePathHint) {
+                    try {
+                        const target = this.app.vault.getAbstractFileByPath(sourcePathHint);
+                        if (target instanceof import_obsidian.TFile && target.path.endsWith('.md')) {
+                            const startMtime = target.stat?.mtime || 0;
+                            const content = await this.app.vault.read(target);
+                            const result = buildReplacedContent(content);
+                            if (!result.replaced) {
+                                return resolve(false);
+                            }
+                            const latest = this.app.vault.getAbstractFileByPath(sourcePathHint);
+                            const latestMtime = (latest instanceof import_obsidian.TFile) ? (latest.stat?.mtime || 0) : 0;
+                            if (startMtime && latestMtime && latestMtime !== startMtime) {
+                                return resolve(false);
+                            }
+                            await this.app.vault.modify(target, result.newContent);
+                            if (pendingByPath) this.consumePendingLinkPlaceholder(pendingByPath.key);
+                            if (pendingByName) this.consumePendingLinkPlaceholder(pendingByName.key);
+                            return resolve(true);
+                        }
+                    } catch (_) {
+                        // Fall through to false.
+                    }
                 }
 
-                // If normalization changed content, persist it even when no direct replacement was needed.
-                if (!replaced && newContent !== content) {
-                    replaced = true;
-                }
-
-                if (!replaced) {
-                    console.warn(`NotePix: Could not find link for "${fileName}" to replace.`);
-                    return resolve(false);
-                }
-
-                const cursor = (typeof editor.getCursor === 'function') ? editor.getCursor() : null;
-                let wrote = false;
-                if (doc?.setValue) {
-                    try { doc.setValue(newContent); wrote = true; } catch (_) { wrote = false; }
-                }
-                if (!wrote && typeof editor.setValue === 'function') {
-                    try { editor.setValue(newContent); wrote = true; } catch (_) { wrote = false; }
-                }
-                if (cursor && typeof editor.setCursor === 'function') {
-                    try { editor.setCursor(cursor); } catch (_) { }
-                }
-                resolve(wrote);
+                console.warn(`NotePix: Could not find link for "${fileName}" to replace.`);
+                resolve(false);
             }, 100);
         });
     }
@@ -1355,16 +1656,17 @@ var MyPlugin = class extends import_obsidian.Plugin {
             const escapedPath = normalizedPath.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
             const regex = new RegExp(`!\\[\\[[^\\]]*${escapedPath}[^\\]]*\\]\\]`);
             const match = content.match(regex);
+            const sourcePath = activeView.file?.path || "";
             if (match && match[0]) {
-                this.recordPendingLinkPlaceholder(file.path, match[0]);
+                this.recordPendingLinkPlaceholder(file.path, match[0], sourcePath);
                 return;
             }
             // Mobile-oriented fallback by filename
             if (this.recentPlaceholdersByName && this.recentPlaceholdersByName.size > 0) {
                 const rec = this.recentPlaceholdersByName.get(file.name);
                 if (rec && rec.placeholder) {
-                    this.recordPendingLinkPlaceholder(file.path, rec.placeholder);
-                    this.recordPendingLinkPlaceholder(file.name, rec.placeholder);
+                    this.recordPendingLinkPlaceholder(file.path, rec.placeholder, sourcePath);
+                    this.recordPendingLinkPlaceholder(file.name, rec.placeholder, sourcePath);
                     this.recentPlaceholdersByName.delete(file.name);
                 }
             }
@@ -1519,11 +1821,20 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
         new import_obsidian.Setting(containerEl).setName("GitHub username").addText((text) => text.setPlaceholder("your-name").setValue(this.plugin.settings.githubUser).onChange(async (value) => {
             this.plugin.settings.githubUser = value;
             this.plugin.clearRepoPrivacyCache();
+            this.plugin.clearRepoListCache();
             await this.plugin.saveSettings();
         }));
         new import_obsidian.Setting(containerEl).setName("Repository name").addText((text) => text.setPlaceholder("obsidian-assets").setValue(this.plugin.settings.repoName).onChange(async (value) => {
+            const previousRepo = (this.plugin.settings.repoName || '').trim();
+            const nextRepo = (value || '').trim();
+            if (previousRepo && nextRepo && previousRepo !== nextRepo) {
+                const history = Array.isArray(this.plugin.settings.repoHistory) ? [...this.plugin.settings.repoHistory] : [];
+                const filtered = history.filter(r => String(r || '').trim() && String(r || '').trim() !== previousRepo && String(r || '').trim() !== nextRepo);
+                this.plugin.settings.repoHistory = [previousRepo, ...filtered].slice(0, 10);
+            }
             this.plugin.settings.repoName = value;
             this.plugin.clearRepoPrivacyCache();
+            this.plugin.clearRepoListCache();
             await this.plugin.saveSettings();
         }));
         new import_obsidian.Setting(containerEl)
@@ -1537,6 +1848,7 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.repoVisibility = value;
                     this.plugin.clearRepoPrivacyCache();
+                    this.plugin.clearRepoListCache();
                     await this.plugin.saveSettings();
                 }));
         new import_obsidian.Setting(containerEl).setName("Branch name").addText((text) => text.setPlaceholder("main").setValue(this.plugin.settings.branchName).onChange(async (value) => {
@@ -2025,6 +2337,7 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                     // Clear plain token for security when switching to encrypted mode
                     this.plugin.settings.plainToken = "";
                     this.plugin.clearRepoPrivacyCache();
+                    this.plugin.clearRepoListCache();
                     await this.plugin.saveSettings();
                     new import_obsidian.Notice("Token has been encrypted and saved!");
                 } catch (e) {
@@ -2043,6 +2356,7 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                     text.onChange(async (value) => {
                         this.plugin.settings.plainToken = value;
                         this.plugin.clearRepoPrivacyCache();
+                        this.plugin.clearRepoListCache();
                         await this.plugin.saveSettings();
                     });
                 });
