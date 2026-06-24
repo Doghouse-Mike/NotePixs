@@ -1081,11 +1081,14 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 await this.app.vault.delete(file);
                 new import_obsidian.Notice(`Local file ${file.name} deleted.`);
             }
-        } catch (error) {
+                 } catch (error) {
             uploadNotice.hide();
-            new import_obsidian.Notice(`Upload failed: ${error.message}`);
+            // FORCED VISIBILITY: If error.message is missing, stringify the whole error object
+            const errorText = error.message || (typeof error === 'string' ? error : JSON.stringify(error));
+            new import_obsidian.Notice(`Upload failed: ${errorText}`, 7000);
             console.error("GitHub Uploader Error:", error);
         }
+
     }
 
     async postProcessImages(element, context) {
