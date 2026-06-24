@@ -1,3 +1,8 @@
+Plan A is to try and implement an option/command so the plugin can work it's magic on images that are already in the vault. 
+- Per note
+- entire vault (DANGER!)
+
+
 # NotePix - GitHub Image Uploader
 
 [![Built for Obsidian](https://img.shields.io/badge/Built%20for-Obsidian-7B68EE.svg?style=for-the-badge)](https://obsidian.md)
