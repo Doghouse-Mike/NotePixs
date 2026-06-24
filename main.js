@@ -107,22 +107,40 @@ var DEFAULT_SETTINGS = {
     extraWatchedList: [],
     localOnlyFolders: '',
     localOnlyList: [],
-    // Mobile integration defaults (safe no-ops on desktop)
     attachmentsFolderName: 'attachment',
     integrateAttachmentsOnMobile: true,
-    // Repo mismatch prompt suppression
     lastPromptedAt: 0,
     lastPromptedRepo: ''
 };
+
 var MyPlugin = class extends import_obsidian.Plugin {
-    // New utility function to upload all existing local images within a targeted note
+    constructor() {
+        super(...arguments);
+        this.decryptedToken = null;
+        this.isPromptingForPassword = false;
+        this.mobileAttachmentFolder = '';
+        this.userApprovedUploads = new Map();
+        this.pendingLinkReplacements = new Map();
+        this.recentPlaceholdersByName = new Map();
+        this.repoPrivacyCache = null;
+        this._fileOpenDebounceTimer = null;
+        this._mismatchNoticeShown = false;
+        this._lastRenderTokenNoticeAt = 0;
+        this.failedImageFetches = new Map();
+        this.pendingLegacyMigrations = new Map();
+        this.pendingLegacyMigrationTimers = new Map();
+        this.repoListCache = null;
+        this.legacyResolvedRepoByKey = new Map();
+        this.legacyUnresolvedUntil = new Map();
+    }
+
+    // --- NEW METHOD: UPLOAD ALL EXISTING IMAGES ---
     async uploadAllLocalImagesInNote(activeFile) {
         if (!this.settings.githubUser || !this.settings.repoName) {
             new import_obsidian.Notice("GitHub User and Repo Name must be configured first.");
             return;
         }
 
-        // 1. Get embedded links cached by Obsidian for this note
         const cache = this.app.metadataCache.getFileCache(activeFile);
         const embeds = cache?.embeds || [];
         if (embeds.length === 0) {
@@ -130,7 +148,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
             return;
         }
 
-        // 2. Identify unique local images
         const imageExtensions = ["png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif"];
         const localImageFiles = [];
         const seenPaths = new Set();
@@ -139,12 +156,10 @@ var MyPlugin = class extends import_obsidian.Plugin {
             const linkPath = embed.link;
             if (!linkPath) continue;
 
-            // Skip web links or remote NotePix links already processed
             if (linkPath.startsWith("http://") || linkPath.startsWith("https://") || linkPath.startsWith("obsidian://")) {
                 continue;
             }
 
-            // Get file metadata relative to vault structure
             const abstractFile = this.app.metadataCache.getFirstLinkpathDest(linkPath, activeFile.path);
             if (abstractFile instanceof import_obsidian.TFile) {
                 const ext = abstractFile.extension.toLowerCase();
@@ -160,17 +175,12 @@ var MyPlugin = class extends import_obsidian.Plugin {
             return;
         }
 
-        // 3. Process batches sequentially or simultaneously
         new import_obsidian.Notice(`Found ${localImageFiles.length} local image(s). Starting migration...`);
         
         let successCount = 0;
         for (const file of localImageFiles) {
             try {
-                // Pre-capture the placeholder signature before running the upload framework
                 this.captureFilePlaceholder(file);
-                
-                // Directly utilize your built-in image processor pipeline
-                // This updates links, clears local files (if deleteLocal is on), and manages your encryption state
                 await this.handleImageUpload(file, false);
                 successCount++;
             } catch (err) {
@@ -181,28 +191,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
         new import_obsidian.Notice(`Finished note migration! Successfully processed ${successCount}/${localImageFiles.length} images.`);
     }
 
-    constructor() {
-        super(...arguments);
-        // This will hold the decrypted token in memory for the session
-        this.decryptedToken = null;
-        this.isPromptingForPassword = false;
-        this.mobileAttachmentFolder = '';
-        this.userApprovedUploads = new Map();
-        // From enhanced mobile version: track pending link replacements and recent placeholders
-        this.pendingLinkReplacements = new Map();
-        this.recentPlaceholdersByName = new Map();
-        // Repo privacy detection cache: { value, timestamp, user, repo }
-        this.repoPrivacyCache = null;
-        this._fileOpenDebounceTimer = null;
-        this._mismatchNoticeShown = false;
-        this._lastRenderTokenNoticeAt = 0;
-        this.failedImageFetches = new Map();
-        this.pendingLegacyMigrations = new Map();
-        this.pendingLegacyMigrationTimers = new Map();
-        this.repoListCache = null;
-        this.legacyResolvedRepoByKey = new Map();
-        this.legacyUnresolvedUntil = new Map();
-    }
     getVaultFolderPaths() {
         const res = [];
         const root = this.app.vault.getRoot();
@@ -219,9 +207,11 @@ var MyPlugin = class extends import_obsidian.Plugin {
         walk(root);
         return res;
     }
+
     normalizeVaultPath(path) {
         return (path || '').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
     }
+
     getLegacyRepoCandidates(primaryRepo) {
         const normalizedPrimary = (primaryRepo || '').trim();
         const history = Array.isArray(this.settings.repoHistory) ? this.settings.repoHistory : [];
@@ -234,7 +224,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
             if (repo) set.add(repo);
         }
 
-        // Heuristic fallback for common rename pattern: singular <-> plural.
         if (normalizedPrimary) {
             if (normalizedPrimary.endsWith('s') && normalizedPrimary.length > 1) {
                 set.add(normalizedPrimary.slice(0, -1));
@@ -245,6 +234,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
 
         return Array.from(set.values());
     }
+
     clearRepoListCache() {
         this.repoListCache = null;
         if (this.legacyResolvedRepoByKey) {
@@ -254,6 +244,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             this.legacyUnresolvedUntil.clear();
         }
     }
+
     async getConfiguredUserRepoList(token) {
         const configuredUser = (this.settings.githubUser || '').trim();
         if (!configuredUser || !token) return [];
@@ -301,6 +292,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             return [];
         }
     }
+
     queueLegacyLinkMigration(sourcePath, oldUrl, newUrl) {
         const path = (sourcePath || '').trim();
         if (!path || !oldUrl || !newUrl || oldUrl === newUrl) return;
@@ -322,6 +314,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
         }, 800);
         this.pendingLegacyMigrationTimers.set(path, timer);
     }
+
     async applyLegacyLinkMigrations(sourcePath) {
         const path = (sourcePath || '').trim();
         if (!path) return;
@@ -356,7 +349,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 const latest = this.app.vault.getAbstractFileByPath(path);
                 const latestMtime = (latest instanceof import_obsidian.TFile) ? (latest.stat?.mtime || 0) : 0;
                 if (startMtime && latestMtime && latestMtime !== startMtime) {
-                    // File changed while migration was preparing; requeue to avoid clobbering newer edits.
                     let map = this.pendingLegacyMigrations.get(path);
                     if (!map) {
                         map = new Map();
@@ -380,6 +372,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             console.error('NotePix: Failed to migrate legacy links', e);
         }
     }
+
     markFileAsUserApproved(path) {
         const norm = this.normalizeVaultPath(path);
         if (!norm) return;
@@ -392,6 +385,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
         }, 6e4);
         this.userApprovedUploads.set(norm, timeoutId);
     }
+
     consumeUserApprovedUpload(path) {
         const norm = this.normalizeVaultPath(path);
         if (!norm) return false;
@@ -401,7 +395,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
         this.userApprovedUploads.delete(norm);
         return true;
     }
-    // From enhanced mobile version: primary local folder + helpers
+
     getPrimaryLocalFolderPath() {
         const fromList = (Array.isArray(this.settings.localOnlyList) && this.settings.localOnlyList.length > 0)
             ? (this.settings.localOnlyList[0]?.path || this.settings.localOnlyList[0] || '')
@@ -409,14 +403,14 @@ var MyPlugin = class extends import_obsidian.Plugin {
         const cleaned = this.normalizeVaultPath(fromList || 'notepix-local');
         return cleaned || 'notepix-local';
     }
+
     async ensureFolderExists(folderPath) {
         if (!folderPath) return;
         try {
             await this.app.vault.createFolder(folderPath);
-        } catch (_) {
-            // already exists
-        }
+        } catch (_) {}
     }
+
     async moveFileToLocalOnly(file) {
         if (!file) return null;
         const originalPath = file.path;
@@ -438,7 +432,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
         await this.app.vault.rename(file, targetPath);
         return { newPath: targetPath, originalPath, originalName };
     }
-    // Mobile-only: track wikilinks inserted into the editor by filename
+
     registerMobileEditorPlaceholderTracking() {
         if (!isMobile) return;
         const attachHandler = (leaf) => {
@@ -476,7 +470,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                             ts: now
                         });
                     }
-                    // Drop entries older than 60s
                     for (const [name, rec] of this.recentPlaceholdersByName.entries()) {
                         if (!rec || typeof rec.ts !== 'number') continue;
                         if (now - rec.ts > 60 * 1000) {
@@ -491,13 +484,14 @@ var MyPlugin = class extends import_obsidian.Plugin {
             this.register(() => {
                 try {
                     cm.off('change', handler);
-                } catch (_) { }
+                } catch (_) {}
             });
         };
         this.registerEvent(this.app.workspace.on('active-leaf-change', attachHandler));
         const activeLeaf = this.app.workspace.activeLeaf;
         if (activeLeaf) attachHandler(activeLeaf);
     }
+
     recordPendingLinkPlaceholder(path, placeholderText, sourcePath = "") {
         const norm = this.normalizeVaultPath(path);
         if (!norm || !placeholderText) return;
@@ -511,6 +505,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
         }, 5 * 60 * 1e3);
         this.pendingLinkReplacements.set(norm, { placeholderText, sourcePath: sourcePathNorm, timeoutId });
     }
+
     peekPendingLinkPlaceholder(pathOrKey) {
         const norm = this.normalizeVaultPath(pathOrKey);
         const key = norm || pathOrKey;
@@ -523,6 +518,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             sourcePath: entry.sourcePath || ""
         };
     }
+
     consumePendingLinkPlaceholder(pathOrKey) {
         const norm = this.normalizeVaultPath(pathOrKey);
         const key = norm || pathOrKey;
@@ -539,16 +535,17 @@ var MyPlugin = class extends import_obsidian.Plugin {
             sourcePath: entry.sourcePath || ""
         };
     }
+
     async promptUploadConfirmation(file) {
         const modal = new ConfirmationModal(this.app, "Upload Image?", `Do you want to upload ${file.name} to GitHub?`);
         return await modal.open();
     }
+
     async onload() {
-            async onload() {
         await this.loadSettings();
         this.addSettingTab(new GitHubUploaderSettingTab(this.app, this));
 
-        // --- NEW COMMAND: UPLOAD ALL LOCAL IMAGES IN CURRENT NOTE ---
+        // --- REGISTER COMMAND PALETTE ITEM ---
         this.addCommand({
             id: 'upload-all-local-images-in-note',
             name: 'Upload all local images in current note',
@@ -561,45 +558,29 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 await this.uploadAllLocalImagesInNote(activeFile);
             }
         });
-        // ------------------------------------------------------------
 
-        // Initialize an in-memory cache for private images
         this.imageCache = new Map();
-        // ... (rest of your existing onload code remains identical)
-
-        
-        await this.loadSettings();
-        this.addSettingTab(new GitHubUploaderSettingTab(this.app, this));
-
-        // Initialize an in-memory cache for private images
-        this.imageCache = new Map();
-
-        // Mobile-only: track recently inserted image placeholders in the editor
         this.registerMobileEditorPlaceholderTracking();
 
-        // MOBILE-ONLY: Integrate Obsidian attachments with NotePix (baseline behavior)
         if (isMobile && (this.settings.integrateAttachmentsOnMobile !== false)) {
             try {
                 const attachFolder = (this.settings.attachmentsFolderName || 'attachment')
                     .replace(/\\\\/g, "/")
                     .replace(/^\/+|\/+$/g, "");
                 if (attachFolder) {
-                    try { await this.app.vault.createFolder(attachFolder); } catch (_) { /* exists */ }
-                    try { this.app.vault.setConfig('attachmentFolderPath', attachFolder); } catch (_) { /* ignore */ }
+                    try { await this.app.vault.createFolder(attachFolder); } catch (_) {}
+                    try { this.app.vault.setConfig('attachmentFolderPath', attachFolder); } catch (_) {}
                     this.mobileAttachmentFolder = attachFolder;
                 }
-            } catch (_) { /* ignore mobile integration errors */ }
+            } catch (_) {}
         }
 
-        // Register the processor that will handle our custom image URLs
         this.registerMarkdownPostProcessor(this.postProcessImages.bind(this));
 
-        // Paste handler (baseline behavior)
         this.registerEvent(
             this.app.workspace.on("editor-paste", this.handlePaste.bind(this))
         );
 
-        // Vault create watcher (baseline + captureFilePlaceholder + handleDeclinedUpload)
         this.registerEvent(
             this.app.vault.on("create", async (file) => {
                 if (!(file instanceof import_obsidian.TFile)) return;
@@ -614,10 +595,8 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     .map(s => (s || '').trim())
                     .filter(Boolean)
                     .map(s => s.replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, ""));
-                // Always ignore any local-only folders (explicitly not for upload)
                 if (localOnly.some(ign => filePathNorm === ign || filePathNorm.startsWith(ign + "/"))) return;
 
-                // Only auto-upload if enabled and inside a watched folder
                 if (!this.settings.autoUpload) return;
 
                 const uploadNorm = (this.settings.uploadImageFolder || 'notepix-uploads')
@@ -639,7 +618,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 const inAttach = attachNorm && (filePathNorm === attachNorm || filePathNorm.startsWith(attachNorm + "/"));
                 if (!(inUpload || inExtra || inAttach)) return;
 
-                // Try to capture placeholder for later replacement (Android attachments)
                 this.captureFilePlaceholder(file);
 
                 const alreadyConfirmed = this.consumeUserApprovedUpload(file.path);
@@ -659,7 +637,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
             })
         );
 
-        // File-open maintenance: sanitize malformed links, then run mismatch check
         this.registerEvent(
             this.app.workspace.on("file-open", async (file) => {
                 if (!file) return;
@@ -670,16 +647,12 @@ var MyPlugin = class extends import_obsidian.Plugin {
     }
 
     onunload() {
-        // Clear the decrypted token from memory
         this.decryptedToken = null;
-        // Clear repo privacy cache and debounce timer
         this.repoPrivacyCache = null;
         if (this._fileOpenDebounceTimer) {
             clearTimeout(this._fileOpenDebounceTimer);
             this._fileOpenDebounceTimer = null;
         }
-
-        // IMPORTANT: Revoke all created blob URLs to prevent memory leaks
         if (this.imageCache) {
             this.imageCache.forEach(url => URL.revokeObjectURL(url));
             this.imageCache.clear();
@@ -712,43 +685,33 @@ var MyPlugin = class extends import_obsidian.Plugin {
             this.legacyUnresolvedUntil.clear();
         }
     }
+
     async handlePaste(evt) {
         const files = evt.clipboardData?.files;
-        if (!files || files.length === 0) {
-            return;
-        }
+        if (!files || files.length === 0) return;
+        
         const imageFile = Array.from(files).find(file => file.type.startsWith("image/"));
-        if (!imageFile) {
-            return;
-        }
+        if (!imageFile) return;
 
-        // If uploadOnPaste is 'always', just upload and finish.
         if (this.settings.uploadOnPaste === 'always') {
             evt.preventDefault();
             await this.uploadPastedImage(imageFile);
             return;
         }
 
-        // If uploadOnPaste is 'ask', we begin the full logic.
         if (this.settings.uploadOnPaste === 'ask') {
-            evt.preventDefault(); // Take control of the paste event.
-
+            evt.preventDefault();
             const modal = new ConfirmationModal(this.app, "Upload Image?", "Do you want to upload this image to GitHub?");
             const confirmed = await modal.open();
-
             if (confirmed) {
-                // If confirmed, proceed with the upload.
                 await this.uploadPastedImage(imageFile);
             } else {
-                // If not confirmed, save the image locally.
                 await this.saveImageLocally(imageFile);
             }
         }
-        // If uploadOnPaste is set to something else, do nothing and let Obsidian handle it.
     }
 
     async uploadPastedImage(imageFile) {
-        // Save the image into the configured upload folder, so watcher logic is consistent
         const arrayBuffer = await imageFile.arrayBuffer();
         const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
         if (!activeView) {
@@ -763,7 +726,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             if (uploadFolder) {
                 await this.app.vault.createFolder(uploadFolder);
             }
-        } catch { }
+        } catch {}
 
         const noteName = activeView.file ? activeView.file.basename : 'Untitled';
         const extension = imageFile.name.split('.').pop() || 'png';
@@ -776,34 +739,27 @@ var MyPlugin = class extends import_obsidian.Plugin {
             i++;
         } while (await this.app.vault.adapter.exists(newFilePath));
 
-        // Pre-approve the path BEFORE createBinary so the vault 'create' watcher
-        // sees the approval even if the event fires synchronously.
         this.markFileAsUserApproved(newFilePath);
 
         let newFile;
         try {
             newFile = await this.app.vault.createBinary(newFilePath, arrayBuffer);
         } catch (e) {
-            // If create failed, remove pre-approval immediately to avoid stale approvals.
             this.consumeUserApprovedUpload(newFilePath);
             throw e;
         }
 
-        // Also approve the actual path in case vault normalized it differently
         if (newFile.path !== newFilePath) {
             this.markFileAsUserApproved(newFile.path);
         }
 
-        // Record a simple placeholder keyed by file path and file name
         const placeholderText = `![[${newFile.name}]]`;
         const sourcePath = activeView.file?.path || "";
         this.recordPendingLinkPlaceholder(newFile.path, placeholderText, sourcePath);
         this.recordPendingLinkPlaceholder(newFile.name, placeholderText, sourcePath);
 
-        // Insert a temporary wikilink to the local file so the eventual upload can replace it with the final URL
         activeView.editor.replaceSelection(placeholderText);
 
-        // If autoUpload is disabled, upload directly; else watcher will trigger and replace the link
         if (!this.settings.autoUpload) {
             await this.handleImageUpload(newFile);
         }
@@ -817,20 +773,15 @@ var MyPlugin = class extends import_obsidian.Plugin {
             return;
         }
 
-        // Determine destination local-only folder (first of list or legacy field)
         const localOnlyFirst = (Array.isArray(this.settings.localOnlyList) && this.settings.localOnlyList.length > 0)
             ? (this.settings.localOnlyList[0]?.path || this.settings.localOnlyList[0] || '')
             : (this.settings.localImageFolder || 'notepix-local');
-        // Normalize to a clean, vault-relative POSIX path
         const folderPath = (localOnlyFirst || 'notepix-local')
             .replace(/\\\\/g, "/")
             .replace(/^\/+|\/+$/g, "");
-        // Ensure the folder exists
         try {
             await this.app.vault.createFolder(folderPath);
-        } catch (e) {
-            // Folder already exists, which is fine
-        }
+        } catch (e) {}
 
         const noteName = activeView.file ? activeView.file.basename : 'Untitled';
         const extension = imageFile.name.split('.').pop() || 'png';
@@ -842,20 +793,14 @@ var MyPlugin = class extends import_obsidian.Plugin {
             i++;
         } while (await this.app.vault.adapter.exists(newFilePath));
 
-
-        // Create the file in the vault at the determined path.
         const newFile = await this.app.vault.createBinary(newFilePath, arrayBuffer);
-
-        // Insert the link to the newly created file.
         activeView.editor.replaceSelection(`![[${newFile.path}]]`);
-    }  // New method to get the token, prompting for password if needed (encrypted mode).
+    }
+
     async getDecryptedToken() {
-        if (this.decryptedToken) {
-            return this.decryptedToken;
-        }
-        if (this.isPromptingForPassword) {
-            return null;
-        }
+        if (this.decryptedToken) return this.decryptedToken;
+        if (this.isPromptingForPassword) return null;
+        
         if (this.settings.useEncryption && this.settings.encryptedToken) {
             this.isPromptingForPassword = true;
             try {
@@ -866,7 +811,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             } catch (e) {
                 const msg = String(e?.message || "");
                 if (msg === "Password not provided") {
-                    // User closed modal without entering password — no notice needed
+                    // Closed without entry
                 } else if (e?.name === 'OperationError' || /decryption|operation/i.test(msg)) {
                     new import_obsidian.Notice("Decryption failed. Incorrect password.", 5e3);
                 } else {
@@ -880,25 +825,17 @@ var MyPlugin = class extends import_obsidian.Plugin {
         return null;
     }
 
-    // Unified token getter: returns a usable GitHub token based on settings/state.
-    // - If a decrypted token is already cached in memory, returns it.
-    // - If useEncryption is true, prompts (once) to decrypt encryptedToken when first needed.
-    // - If useEncryption is false, returns the plainToken from settings (no prompts).
     async getToken() {
-        // In-memory cache takes precedence
         if (this.decryptedToken) return this.decryptedToken;
 
-        // Encrypted mode
         if (this.settings.useEncryption) {
             if (!this.settings.encryptedToken) {
                 new import_obsidian.Notice("No encrypted token found. Please save an encrypted token in NotePix settings.");
                 return null;
             }
-            const token = await this.getDecryptedToken();
-            return token;
+            return await this.getDecryptedToken();
         }
 
-        // Plain mode
         if (this.settings.plainToken && this.settings.plainToken.trim().length > 0) {
             return this.settings.plainToken.trim();
         }
@@ -906,13 +843,11 @@ var MyPlugin = class extends import_obsidian.Plugin {
         return null;
     }
 
-    // --- Repo Privacy Detection (cached, 10-min TTL) ---
     async getRepoPrivacy() {
         const user = (this.settings.githubUser || '').trim();
         const repo = (this.settings.repoName || '').trim();
         if (!user || !repo) return "unknown";
 
-        // Return cached value if still valid (10 min TTL, same user+repo)
         if (this.repoPrivacyCache &&
             this.repoPrivacyCache.user === user &&
             this.repoPrivacyCache.repo === repo &&
@@ -920,13 +855,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             return this.repoPrivacyCache.value;
         }
 
-        // Need a token — don't trigger password prompt, only use what's available
-        let token;
-        if (this.decryptedToken) {
-            token = this.decryptedToken;
-        } else if (!this.settings.useEncryption && this.settings.plainToken) {
-            token = this.settings.plainToken.trim();
-        }
+        let token = this.decryptedToken || (!this.settings.useEncryption && this.settings.plainToken ? this.settings.plainToken.trim() : null);
         if (!token) return "unknown";
 
         try {
@@ -949,9 +878,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
         this.repoPrivacyCache = null;
     }
 
-    // Check whether a note contains raw GitHub image URLs owned by the configured user.
-    // This intentionally allows any repo under that user while still restricting to
-    // image-like paths to avoid unrelated raw GitHub links.
     containsConfiguredRepoRawImages(content) {
         if (!content) return false;
         const user = (this.settings.githubUser || '').trim();
@@ -965,10 +891,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
         return rawConfiguredUserRegex.test(content);
     }
 
-    // Repair malformed nested NotePix markdown URLs that can appear after partial replacements.
-    // Example:
-    // ![198]([obsidian://notepix/assets](obsidian://notepix/v2/<owner>/<repo>/<branch>/assets)/file.png)
-    // -> ![198](obsidian://notepix/v2/<owner>/<repo>/<branch>/assets/file.png)
     sanitizeMalformedNotepixLinks(content) {
         if (!content || typeof content !== 'string') return content;
         const malformedNestedLink = /!\[([^\]]*)\]\(\[obsidian:\/\/notepix\/[^\]]*\]\((obsidian:\/\/notepix\/v2\/[^)]+)\)\/([^)]+)\)/g;
@@ -994,7 +916,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
         }
     }
 
-    // Debounced mismatch check triggered on file-open (public mode only)
     checkRepoMismatchOnFileOpen(file) {
         if (this._fileOpenDebounceTimer) {
             clearTimeout(this._fileOpenDebounceTimer);
@@ -1002,7 +923,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
         this._fileOpenDebounceTimer = setTimeout(async () => {
             try {
                 if (!file || !file.path || !file.path.endsWith('.md')) return;
-                // Mismatch prompting is only meaningful in forced public mode.
                 if (this.settings.repoVisibility !== 'public') return;
 
                 const content = await this.app.vault.read(file);
@@ -1011,7 +931,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 const privacy = await this.getRepoPrivacy();
                 if (privacy !== 'private') return;
 
-                // Prompt suppression: skip if same repo prompted within 24 hours
                 const user = (this.settings.githubUser || '').trim();
                 const repo = (this.settings.repoName || '').trim();
                 const repoKey = `${user}/${repo}`;
@@ -1021,11 +940,9 @@ var MyPlugin = class extends import_obsidian.Plugin {
 
                 if (lastRepo === repoKey && (Date.now() - lastAt) < twentyFourHours) return;
 
-                // Show 3-button mismatch modal
                 const modal = new RepoMismatchModal(this.app, repoKey);
                 const choice = await modal.openAndWait();
 
-                // Persist prompt timestamp regardless of choice
                 this.settings.lastPromptedAt = Date.now();
                 this.settings.lastPromptedRepo = repoKey;
 
@@ -1039,7 +956,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     this.settings.repoVisibility = 'public';
                     new import_obsidian.Notice("NotePix: Keeping Public mode. Raw URLs may not load for private repos.");
                 }
-                // If choice is null (modal closed without picking), suppress for 24h anyway
                 await this.saveSettings();
             } catch (e) {
                 console.error("NotePix: Mismatch check error:", e);
@@ -1051,9 +967,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
         const lastAt = this.settings.lastPromptedAt || 0;
         const lastRepo = this.settings.lastPromptedRepo || '';
         const twentyFourHours = 24 * 60 * 60 * 1000;
-        if (lastRepo === repoKey && (Date.now() - lastAt) < twentyFourHours) {
-            return null;
-        }
+        if (lastRepo === repoKey && (Date.now() - lastAt) < twentyFourHours) return null;
 
         const modal = new RepoMismatchModal(this.app, repoKey);
         const choice = await modal.openAndWait();
@@ -1082,6 +996,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
         }
         const token = await this.getToken();
         if (!token) return;
+        
         const uploadNotice = new import_obsidian.Notice(`Uploading ${file.name} to GitHub...`, 0);
         try {
             const timestamp = new Date().toISOString().replace(/[-:.]/g, "");
@@ -1104,15 +1019,14 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 },
                 body: JSON.stringify(requestBody)
             });
+            
             uploadNotice.hide();
             if (!response.ok) {
                 throw new Error(`GitHub API Error: ${(await response.json()).message}`);
             }
 
             let finalUrl;
-            // Determine URL format based on repo visibility mode
             if (this.settings.repoVisibility === 'private') {
-                // Private mode: self-describing format with owner/repo/branch embedded
                 const encOwner = encodeURIComponent(this.settings.githubUser);
                 const encRepo = encodeURIComponent(this.settings.repoName);
                 const encBranch = encodeURIComponent(this.settings.branchName);
@@ -1120,7 +1034,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 finalUrl = `obsidian://notepix/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
                 new import_obsidian.Notice("Private image link created.");
             } else if (this.settings.repoVisibility === 'auto') {
-                // Auto mode: detect repo privacy and decide
                 const detectedPrivacy = await this.getRepoPrivacy();
                 if (detectedPrivacy === 'private') {
                     const encOwner = encodeURIComponent(this.settings.githubUser);
@@ -1130,21 +1043,17 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     finalUrl = `obsidian://notepix/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
                     new import_obsidian.Notice("Private repo detected. Private image link created.");
                 } else {
-                    // Public or unknown — use raw URL (safe fallback)
                     finalUrl = `https://raw.githubusercontent.com/${this.settings.githubUser}/${this.settings.repoName}/${this.settings.branchName}/${filePath}`;
                     if (detectedPrivacy === 'unknown') {
                         new import_obsidian.Notice("Could not detect repo privacy. Using public URL as fallback.");
                     }
                 }
             } else {
-                // Public mode: standard raw GitHub URL, but if repo is actually private,
-                // prompt user with the same 3-button mismatch modal.
                 const detectedPrivacy = await this.getRepoPrivacy();
                 if (detectedPrivacy === 'private') {
                     const repoKey = `${(this.settings.githubUser || '').trim()}/${(this.settings.repoName || '').trim()}`;
                     await this.maybePromptRepoMismatch(repoKey);
                 }
-                // Re-check: user may have switched visibility in the mismatch prompt
                 if (this.settings.repoVisibility !== 'public' && detectedPrivacy === 'private') {
                     const encOwner = encodeURIComponent(this.settings.githubUser);
                     const encRepo = encodeURIComponent(this.settings.repoName);
@@ -1187,38 +1096,22 @@ var MyPlugin = class extends import_obsidian.Plugin {
 
             const decodePathSafely = (value) => {
                 if (!value || typeof value !== 'string') return value;
-                try {
-                    return decodeURIComponent(value);
-                } catch (_) {
-                    return value;
-                }
+                try { return decodeURIComponent(value); } catch (_) { return value; }
             };
             const decodeSegmentSafely = (value) => {
                 if (typeof value !== 'string') return '';
-                try {
-                    return decodeURIComponent(value);
-                } catch (_) {
-                    return value;
-                }
+                try { return decodeURIComponent(value); } catch (_) { return value; }
             };
 
-            // Recover malformed links like:
-            // ![198]([obsidian://notepix/assets](obsidian://notepix/v2/.../assets)/file.png)
-            // which can appear in DOM as an encoded app:// URL.
             const recoverMalformedNotepixSrc = (src) => {
                 if (!src) return null;
                 let candidate = src;
                 if (candidate.startsWith("app://")) {
                     const idx = candidate.indexOf("%5Bobsidian://notepix/");
                     if (idx >= 0) {
-                        try {
-                            candidate = decodeURIComponent(candidate.substring(idx));
-                        } catch (_) {
-                            // Keep original candidate if decoding fails.
-                        }
+                        try { candidate = decodeURIComponent(candidate.substring(idx)); } catch (_) {}
                     }
                 }
-
                 const malformed = candidate.match(/\[obsidian:\/\/notepix\/[^\]]*\]\((obsidian:\/\/notepix\/v2\/[^)]+)\)\/(.+)$/);
                 if (!malformed) return null;
                 const base = (malformed[1] || "").replace(/\/+$/, "");
@@ -1229,14 +1122,8 @@ var MyPlugin = class extends import_obsidian.Plugin {
 
             const cfgUser = (this.settings.githubUser || '').trim();
             const cfgRepo = (this.settings.repoName || '').trim();
+            const rawSameUserRegex = cfgUser ? new RegExp(`^https:\\/\\/raw\\.githubusercontent\\.com\\/${escapeRegex(cfgUser)}\\/([^\\/]+)\\/(.+)$`, 'i') : null;
 
-            // Match raw links from any repository owned by the configured user.
-            // Example: https://raw.githubusercontent.com/<user>/<repo>/<branch>/<path>
-            const rawSameUserRegex = cfgUser
-                ? new RegExp(`^https:\\/\\/raw\\.githubusercontent\\.com\\/${escapeRegex(cfgUser)}\\/([^\\/]+)\\/(.+)$`, 'i')
-                : null;
-
-            // Categorize images into processable items
             const toProcess = [];
             const rawCandidates = [];
             for (const img of images) {
@@ -1252,7 +1139,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 if (src.startsWith("obsidian://notepix/")) {
                     const afterPrefix = src.substring("obsidian://notepix/".length);
                     if (afterPrefix.startsWith("v2/")) {
-                        // New self-describing format: v2/{owner}/{repo}/{branch}/{path}
                         const parts = afterPrefix.substring(3).split('/');
                         if (parts.length >= 4) {
                             toProcess.push({
@@ -1265,7 +1151,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                             });
                         }
                     } else {
-                        // Legacy format: use current settings
                         toProcess.push({
                             img,
                             owner: cfgUser,
@@ -1273,8 +1158,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                             fallbackRepos: this.getLegacyRepoCandidates(cfgRepo),
                             branch: this.settings.branchName || 'main',
                             legacySrc: src,
-                            // Legacy links can carry encoded segments (e.g. %20); decode once
-                            // so API path encoding below does not double-encode.
                             path: decodePathSafely(afterPrefix),
                             type: 'notepix-legacy'
                         });
@@ -1289,7 +1172,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                             const configuredBranch = (this.settings.branchName || '').trim();
                             let branch = repoRest.substring(0, slashIdx);
                             let rawPath = repoRest.substring(slashIdx + 1);
-                            // Branch names can contain slashes; prefer configured branch when it matches.
                             if (configuredBranch && repoRest.startsWith(`${configuredBranch}/`)) {
                                 branch = configuredBranch;
                                 rawPath = repoRest.substring(configuredBranch.length + 1);
@@ -1299,7 +1181,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                                 owner: cfgUser,
                                 repo: parsedRepo,
                                 branch,
-                                // Raw URLs can include percent-encoded characters.
                                 path: decodePathSafely(rawPath),
                                 type: 'raw-fallback'
                             });
@@ -1308,46 +1189,27 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 }
             }
 
-            // Raw fallback should apply to same-user raw links regardless of repo name.
-            // This preserves rendering of older links from sibling repos while uploads still
-            // target the currently configured repository.
             if (rawCandidates.length > 0) {
                 toProcess.push(...rawCandidates);
             }
 
             if (toProcess.length === 0) return;
 
-            // Token handling: avoid password prompt in hover popovers
-            const hoverPopover = (this.app && this.app.renderContext)
-                ? this.app.renderContext.hoverPopover : null;
+            const hoverPopover = (this.app && this.app.renderContext) ? this.app.renderContext.hoverPopover : null;
             const isPopoverByAPI = !!hoverPopover;
             const activeLeaf = this.app.workspace.activeLeaf;
             const contextEl = context?.containerEl;
             const leafEl = activeLeaf?.containerEl;
             const isInActiveLeaf = !!(leafEl && contextEl && leafEl.contains(contextEl));
-            // If we can't determine containment (missing DOM refs), assume active leaf
-            // to avoid silently skipping image rendering in the main preview.
             const isHover = isPopoverByAPI || (contextEl ? !isInActiveLeaf : false);
 
             let token;
             if (isHover) {
-                if (this.settings.useEncryption) {
-                    token = this.decryptedToken;
-                } else {
-                    token = (this.settings.plainToken || '').trim() || null;
-                }
+                token = this.settings.useEncryption ? this.decryptedToken : (this.settings.plainToken || '').trim() || null;
                 if (!token) return;
             } else {
-                // In active preview (non-hover), allow one password prompt when encrypted token exists.
-                // This restores expected behavior after app restart while still avoiding spam.
                 if (this.settings.useEncryption) {
-                    if (this.decryptedToken) {
-                        token = this.decryptedToken;
-                    } else if (this.settings.encryptedToken) {
-                        token = await this.getToken();
-                    } else {
-                        token = null;
-                    }
+                    token = this.decryptedToken ? this.decryptedToken : (this.settings.encryptedToken ? await this.getToken() : null);
                 } else {
                     token = (this.settings.plainToken || '').trim() || null;
                 }
@@ -1389,7 +1251,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     ordered.push(...staticCandidates, ...dynamicCandidates);
                     repoCandidates = Array.from(new Set(ordered.filter(Boolean)));
                     if (repoCandidates.length === 0 && repo) repoCandidates = [repo];
-                    // Hard cap to avoid excessive candidate scanning on very large accounts.
                     if (repoCandidates.length > 25) {
                         repoCandidates = repoCandidates.slice(0, 25);
                     }
@@ -1402,9 +1263,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     const cacheKey = `${owner}/${repoCandidate}/${branch}/${path}`.replace(/\\\\/g, "/");
                     const now = Date.now();
                     const failTs = this.failedImageFetches.get(cacheKey) || 0;
-                    if (failTs && (now - failTs) < 30 * 1000) {
-                        return null;
-                    }
+                    if (failTs && (now - failTs) < 30 * 1000) return null;
 
                     if (this.imageCache.has(cacheKey)) {
                         img.src = this.imageCache.get(cacheKey);
@@ -1423,7 +1282,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                         if (response.ok) {
                             imageBlob = await response.blob();
                         } else {
-                            // Fallback to JSON content API
                             response = await fetch(apiUrl, {
                                 method: "GET",
                                 headers: { "Authorization": `token ${token}`, "Accept": "application/vnd.github.v3+json" }
@@ -1467,7 +1325,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                         this.legacyUnresolvedUntil.set(legacyKey, Date.now() + 5 * 60 * 1000);
                     }
                     img.src = errorSvg;
-                    console.error(`NotePix: Failed to fetch image ${owner}/${repo}/${branch}/${path} from candidate repos.`);
                     return;
                 }
 
@@ -1477,8 +1334,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     this.legacyUnresolvedUntil.delete(legacyKey);
                 }
 
-                // Migrate legacy links only after a successful, concrete resolution.
-                // No guessing: we only rewrite when an exact source path resolves from a known repo.
                 if (type === 'notepix-legacy' && item.legacySrc && context?.sourcePath) {
                     const encOwner = encodeURIComponent(owner || '');
                     const encRepo = encodeURIComponent(resolvedRepo || '');
@@ -1490,7 +1345,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     }
                 }
 
-                // Subtle notice for raw-fallback images (once per session)
                 if (type === 'raw-fallback' && !showedRawNotice && !this._mismatchNoticeShown) {
                     this._mismatchNoticeShown = true;
                     showedRawNotice = true;
@@ -1498,17 +1352,14 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 }
             };
 
-            // Process all categorized images in parallel
             await Promise.allSettled(toProcess.map(item => fetchAndSet(item)));
 
-            // Observe DOM for late-added notepix images
             const observer = new MutationObserver((mutations) => {
                 for (const m of mutations) {
                     for (const node of Array.from(m.addedNodes)) {
                         if (node.nodeType !== 1) continue;
                         const el = node;
-                        const imgs = (el.matches && el.matches('img') ? [el]
-                            : Array.from(el.querySelectorAll ? el.querySelectorAll('img') : []));
+                        const imgs = (el.matches && el.matches('img') ? [el] : Array.from(el.querySelectorAll ? el.querySelectorAll('img') : []));
                         for (const addedImg of imgs) {
                             let src = addedImg.getAttribute('src');
                             if (!src) continue;
@@ -1552,7 +1403,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
         }
     }
 
-    // NEW: clean, filename-friendly replacement that also uses pending placeholders
     async replaceLinkInEditor(fileName, replacementTarget, originalPath = "", options = {}) {
         const replacementType = options?.replacementType || 'remote';
         const replacementText = replacementType === 'wiki'
@@ -1570,9 +1420,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 const buildReplacedContent = (content) => {
                     if (!content) return { replaced: false, newContent: content };
 
-                    // Normalize malformed content that can appear from partial replacements:
-                    // ![198]([obsidian://notepix/assets](obsidian://notepix/v2/.../assets)/file.png)
-                    // -> ![198](obsidian://notepix/v2/.../assets/file.png)
                     const malformedNestedLink = /!\[([^\]]*)\]\(\[obsidian:\/\/notepix\/[^\]]*\]\((obsidian:\/\/notepix\/v2\/[^)]+)\)\/([^)]+)\)/g;
                     let normalizedContent = content.replace(malformedNestedLink, (_m, alt, base, tail) => {
                         const cleanedBase = String(base || '').replace(/\/+$/, '');
@@ -1594,22 +1441,17 @@ var MyPlugin = class extends import_obsidian.Plugin {
                                 globalRegex.lastIndex += 1;
                             }
                         }
-                        if (!lastMatch) {
-                            return { replaced: false, value: source };
-                        }
+                        if (!lastMatch) return { replaced: false, value: source };
                         const before = source.slice(0, lastMatch.index);
                         const after = source.slice(lastMatch.index + lastMatch.text.length);
                         return { replaced: true, value: `${before}${replacement}${after}` };
                     };
 
                     const patterns = [];
-                    // Wikilink by filename (Android attachments: ![[Screenshot_....jpg]])
                     patterns.push(new RegExp(`!\\[\\[(?:[^\\]|]*?/)*${escapedFileName}(?:\\|[^\\]]*)?\\]\\]`));
-                    // Wikilink by normalized path if available
                     if (escapedPath) {
                         patterns.push(new RegExp(`!\\[\\[(?:[^\\]|]*?/)*${escapedPath}(?:\\|[^\\]]*)?\\]\\]`));
                     }
-                    // Markdown image links by filename
                     patterns.push(new RegExp(`!\\[[^\\]]*\\]\\([^\\)]*${escapedFileName}[^\\)]*\\)`));
                     patterns.push(new RegExp(`!\\[[^\\]]*\\]\\([^\\)]*${encodeURIComponent(fileName)}[^\\)]*\\)`));
                     if (escapedPath) {
@@ -1620,8 +1462,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     let replaced = false;
                     let newContent = normalizedContent;
 
-                    // First preference: replace the exact pending placeholder captured for this file.
-                    // This is the most deterministic option when filenames repeat in the same note.
                     const fallbackPlaceholder = pendingEntry?.placeholderText || null;
                     if (fallbackPlaceholder && newContent.includes(fallbackPlaceholder)) {
                         const idx = newContent.lastIndexOf(fallbackPlaceholder);
@@ -1639,11 +1479,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                         newContent = result.value;
                     }
 
-                    // If normalization changed content, persist it even when no direct replacement was needed.
-                    if (!replaced && newContent !== content) {
-                        replaced = true;
-                    }
-
+                    if (!replaced && newContent !== content) replaced = true;
                     return { replaced, newContent };
                 };
 
@@ -1667,13 +1503,13 @@ var MyPlugin = class extends import_obsidian.Plugin {
                         const cursor = (typeof editor.getCursor === 'function') ? editor.getCursor() : null;
                         let wrote = false;
                         if (doc?.setValue) {
-                            try { doc.setValue(result.newContent); wrote = true; } catch (_) { wrote = false; }
+                            try { doc.setValue(result.newContent); wrote = true; } catch (_) {}
                         }
                         if (!wrote && typeof editor.setValue === 'function') {
-                            try { editor.setValue(result.newContent); wrote = true; } catch (_) { wrote = false; }
+                            try { editor.setValue(result.newContent); wrote = true; } catch (_) {}
                         }
                         if (cursor && typeof editor.setCursor === 'function') {
-                            try { editor.setCursor(cursor); } catch (_) { }
+                            try { editor.setCursor(cursor); } catch (_) {}
                         }
                         if (wrote) {
                             if (pendingByPath) this.consumePendingLinkPlaceholder(pendingByPath.key);
@@ -1683,7 +1519,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     }
                 }
 
-                // Fallback: apply replacement directly to the source note file if known.
                 if (sourcePathHint) {
                     try {
                         const target = this.app.vault.getAbstractFileByPath(sourcePathHint);
@@ -1691,31 +1526,24 @@ var MyPlugin = class extends import_obsidian.Plugin {
                             const startMtime = target.stat?.mtime || 0;
                             const content = await this.app.vault.read(target);
                             const result = buildReplacedContent(content);
-                            if (!result.replaced) {
-                                return resolve(false);
-                            }
+                            if (!result.replaced) return resolve(false);
+                            
                             const latest = this.app.vault.getAbstractFileByPath(sourcePathHint);
                             const latestMtime = (latest instanceof import_obsidian.TFile) ? (latest.stat?.mtime || 0) : 0;
-                            if (startMtime && latestMtime && latestMtime !== startMtime) {
-                                return resolve(false);
-                            }
+                            if (startMtime && latestMtime && latestMtime !== startMtime) return resolve(false);
+                            
                             await this.app.vault.modify(target, result.newContent);
                             if (pendingByPath) this.consumePendingLinkPlaceholder(pendingByPath.key);
                             if (pendingByName) this.consumePendingLinkPlaceholder(pendingByName.key);
                             return resolve(true);
                         }
-                    } catch (_) {
-                        // Fall through to false.
-                    }
+                    } catch (_) {}
                 }
-
-                console.warn(`NotePix: Could not find link for "${fileName}" to replace.`);
                 resolve(false);
             }, 100);
         });
     }
 
-    // Capture placeholder in current note content matching this file
     captureFilePlaceholder(file) {
         if (!file) return;
         const normalizedPath = this.normalizeVaultPath(file.path);
@@ -1730,16 +1558,10 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 try {
                     const doc = editor.getDoc();
                     content = doc?.getValue?.() || "";
-                } catch (_) {
-                    content = "";
-                }
+                } catch (_) {}
             }
             if (!content && typeof editor.getValue === 'function') {
-                try {
-                    content = editor.getValue();
-                } catch (_) {
-                    content = "";
-                }
+                try { content = editor.getValue(); } catch (_) {}
             }
             if (!content) return;
 
@@ -1751,7 +1573,6 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 this.recordPendingLinkPlaceholder(file.path, match[0], sourcePath);
                 return;
             }
-            // Mobile-oriented fallback by filename
             if (this.recentPlaceholdersByName && this.recentPlaceholdersByName.size > 0) {
                 const rec = this.recentPlaceholdersByName.get(file.name);
                 if (rec && rec.placeholder) {
@@ -1813,9 +1634,7 @@ var PasswordPrompt = class extends import_obsidian.Modal {
         contentEl.createEl("h2", { text: "Enter master password" });
         new import_obsidian.Setting(contentEl).setName("Password").addText((text) => {
             text.inputEl.type = "password";
-            text.onChange((value) => {
-                this.password = value;
-            });
+            text.onChange((value) => { this.password = value; });
             text.inputEl.addEventListener("keydown", (event) => {
                 if (event.key === "Enter") {
                     event.preventDefault();
@@ -1832,6 +1651,7 @@ var PasswordPrompt = class extends import_obsidian.Modal {
         this.resolve(this.password);
         this.close();
     }
+    onOpen() {}
     onClose() {
         if (!this.submitted) {
             this.reject(new Error("Password not provided"));
@@ -1860,9 +1680,7 @@ var SimpleFolderPickerModal = class extends import_obsidian.Modal {
                 this.close();
             };
         };
-        // Root folder entry
         makeButton('/', '');
-        // Other folders
         (this.folderPaths || [])
             .filter(p => p.length > 0)
             .sort((a, b) => a.localeCompare(b))
@@ -1881,7 +1699,6 @@ var VaultFolderSuggestModal = class extends import_obsidian.FuzzySuggestModal {
         this.onPick = onPick;
     }
     getItems() {
-        // Include root as empty string to show '/'
         const uniq = new Set(['', ...this.folderPaths]);
         return Array.from(uniq.values());
     }
@@ -1900,9 +1717,7 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
         this.masterPassword = "";
         this.githubToken = "";
         this.plugin = plugin;
-        // UI state: reveal extra folders input only when requested or already set
         this.showExtraFolders = (this.plugin.settings.extraWatchedFolders || "").trim().length > 0;
-        // Track last valid upload folder for inline validation
         this.lastValidUploadFolder = this.plugin.settings.uploadImageFolder || 'notepix-uploads';
     }
     display() {
@@ -1990,7 +1805,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                 modal.open();
             });
         });
-        // Plus button to reveal local-only rows, matching the Upload section UX
         localPrimarySetting.addExtraButton((btn) => {
             btn.setIcon?.("plus");
             if (!btn.setIcon) btn.setButtonText("+");
@@ -2001,7 +1815,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
             });
         });
 
-        // Anchor where local-only section will render on demand (hidden until plus is clicked)
         const localOnlyAnchor = containerEl.createDiv({ cls: 'notepix-localonly-anchor' });
 
         const renderLocalOnlyRows = () => {
@@ -2010,7 +1823,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
             const section = localOnlyAnchor.createDiv({ cls: 'notepix-localonly-folders' });
             section.createEl('h4', { text: 'Additional local-only folders' });
 
-            // Seed model from structured or CSV fallback
             const fromCSV = (v) => (v || '').split(',').map(s => s.trim()).filter(Boolean).map(p => ({ path: p, label: '' }));
             let locals = Array.isArray(this.plugin.settings.localOnlyList) && this.plugin.settings.localOnlyList.length > 0
                 ? this.plugin.settings.localOnlyList.map(e => ({ path: e.path || '', label: e.label || '' }))
@@ -2020,7 +1832,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
             const isValidPath = (p) => allFolders.includes(p) || p === '';
 
             const save = async () => {
-                // Enforce mutual exclusivity for non-empty paths only; keep empty rows so +Add works
                 const uploadNorm = (this.plugin.settings.uploadImageFolder || 'notepix-uploads').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
                 const extra = (Array.isArray(this.plugin.settings.extraWatchedList) && this.plugin.settings.extraWatchedList.length > 0
                     ? this.plugin.settings.extraWatchedList.map(e => e?.path || '')
@@ -2029,11 +1840,10 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                     .map(s => s.replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, ""));
                 locals = locals.filter(f => {
                     const raw = f.path || '';
-                    if (!raw.trim()) return true; // keep empty rows
+                    if (!raw.trim()) return true;
                     const p = raw.replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
                     return p !== uploadNorm && !extra.includes(p);
                 });
-                // Persist structured and CSV fallbacks
                 this.plugin.settings.localOnlyList = locals;
                 this.plugin.settings.localOnlyFolders = locals.map(f => f.path).filter(Boolean).join(', ');
                 await this.plugin.saveSettings();
@@ -2041,7 +1851,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
 
             locals.forEach((item, idx) => {
                 const row = new import_obsidian.Setting(section).setName(`Local-only ${idx + 1}`);
-                // Path input with validation
                 row.addText(t => {
                     t.setPlaceholder('path/to/folder')
                         .setValue(item.path)
@@ -2052,7 +1861,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                             t.inputEl.style.borderColor = valid || item.path.length === 0 ? '' : 'var(--color-red)';
                         });
                 });
-                // Browse
                 row.addExtraButton(btn => {
                     btn.setIcon?.('folder-open');
                     if (!btn.setIcon) btn.setButtonText('Browse');
@@ -2066,7 +1874,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                         modal.open();
                     });
                 });
-                // Label
                 row.addText(t => {
                     t.setPlaceholder('Optional label (e.g., Local screenshots)')
                         .setValue(item.label || '')
@@ -2075,7 +1882,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                             await save();
                         });
                 });
-                // Reorder up/down
                 row.addExtraButton(btn => {
                     btn.setIcon?.('arrow-up');
                     if (!btn.setIcon) btn.setButtonText('Up');
@@ -2104,7 +1910,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                         }
                     });
                 });
-                // Remove
                 row.addExtraButton(btn => {
                     btn.setIcon?.('trash');
                     if (!btn.setIcon) btn.setButtonText('Remove');
@@ -2117,7 +1922,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                 });
             });
 
-            // Add row button
             const addRow = new import_obsidian.Setting(section).setName('Add local-only folder');
             addRow.addButton(b => b.setButtonText('+ Add').setCta().onClick(async () => {
                 locals.push({ path: '', label: '' });
@@ -2126,7 +1930,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
             }));
         };
 
-        // Auto-render local-only rows if settings already contain values
         if ((this.plugin.settings.localOnlyFolders || '').trim().length > 0 || (this.plugin.settings.localOnlyList || []).length > 0) {
             renderLocalOnlyRows();
         }
@@ -2140,7 +1943,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                 .setValue(this.plugin.settings.uploadImageFolder || 'notepix-uploads')
                 .onChange(async (value) => {
                     const val = (value || '').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "").trim();
-                    // Build local-only list (structured or CSV or legacy)
                     const localOnly = (Array.isArray(this.plugin.settings.localOnlyList) && this.plugin.settings.localOnlyList.length > 0
                         ? this.plugin.settings.localOnlyList.map(e => e?.path || '')
                         : (this.plugin.settings.localOnlyFolders || this.plugin.settings.localImageFolder || 'notepix-local').split(','))
@@ -2150,7 +1952,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
 
                     const conflicts = val.length > 0 && localOnly.includes(val);
                     if (conflicts) {
-                        // Visual warning and revert to last valid value
                         text.inputEl.style.borderColor = 'var(--color-red)';
                         new import_obsidian.Notice("Upload folder cannot be one of the local-only folders.");
                         setTimeout(() => {
@@ -2174,7 +1975,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                 const folders = this.plugin.getVaultFolderPaths();
                 const modal = new VaultFolderSuggestModal(this.app, folders, (picked) => {
                     const val = (picked || '').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
-                    // Conflict check against local-only
                     const localOnly = (Array.isArray(this.plugin.settings.localOnlyList) && this.plugin.settings.localOnlyList.length > 0
                         ? this.plugin.settings.localOnlyList.map(e => e?.path || '')
                         : (this.plugin.settings.localOnlyFolders || this.plugin.settings.localImageFolder || 'notepix-local').split(','))
@@ -2194,7 +1994,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
             });
         });
 
-        // MOBILE INFO: show that attachments folder is auto-watched on mobile
         if (isMobile) {
             new import_obsidian.Setting(containerEl)
                 .setName("Mobile attachments integration")
@@ -2205,12 +2004,10 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                 });
         }
 
-        // Create anchor right below the upload section so extra folders render under the plus button
         const extraAnchor = containerEl.createDiv({ cls: 'notepix-extra-anchor' });
         uploadSetting.addExtraButton((btn) => {
             btn.setIcon?.("plus");
             btn.setTooltip?.("Add more folders to watch");
-            // Fallback text if setIcon is not available
             if (!btn.setIcon) btn.setButtonText("+");
             btn.onClick(() => {
                 this.showExtraFolders = true;
@@ -2221,7 +2018,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
         if (this.showExtraFolders || (this.plugin.settings.extraWatchedFolders || "").trim().length > 0 || (this.plugin.settings.extraWatchedList || []).length > 0) {
             extraAnchor.createEl('h4', { text: 'Additional watched folders' });
 
-            // Seed folders model from structured list or CSV fallback
             const fromCSV = (v) => (v || '').split(',').map(s => s.trim()).filter(Boolean).map(p => ({ path: p, label: '' }));
             let folders = Array.isArray(this.plugin.settings.extraWatchedList) && this.plugin.settings.extraWatchedList.length > 0
                 ? this.plugin.settings.extraWatchedList.map(e => ({ path: e.path || '', label: e.label || '' }))
@@ -2231,12 +2027,11 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
             const isValidPath = (p) => allFolders.includes(p) || p === '';
 
             const save = async () => {
-                // Filter out exact duplicates (keep first occurrences) and persist
                 const seen = new Set();
                 const deduped = [];
                 for (const f of folders) {
                     const p = (f.path || '').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
-                    if (!p) continue; // keep empty rows out of persisted list
+                    if (!p) continue;
                     if (seen.has(p)) continue;
                     seen.add(p);
                     deduped.push({ path: p, label: f.label || '' });
@@ -2253,14 +2048,11 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
 
                 folders.forEach((item, idx) => {
                     const row = new import_obsidian.Setting(section).setName(`Folder ${idx + 1}`);
-
-                    // Path input with validation
                     row.addText(t => {
                         t.setPlaceholder('path/to/folder')
                             .setValue(item.path)
                             .onChange(async (val) => {
                                 item.path = val.trim();
-                                // Build conflict sets
                                 const uploadNorm = (this.plugin.settings.uploadImageFolder || 'notepix-uploads').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
                                 const localOnly = (Array.isArray(this.plugin.settings.localOnlyList) && this.plugin.settings.localOnlyList.length > 0
                                     ? this.plugin.settings.localOnlyList.map(e => e?.path || '')
@@ -2272,7 +2064,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                                 const duplicate = folders.some((f, j) => j !== idx && (f.path || '').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "") === valNorm);
                                 const conflicts = valNorm && (valNorm === uploadNorm || localOnly.includes(valNorm) || duplicate);
                                 await save();
-                                // visual validation: red if invalid path or conflicts
                                 const valid = isValidPath(item.path) && !conflicts;
                                 t.inputEl.style.borderColor = valid || item.path.length === 0 ? '' : 'var(--color-red)';
                                 if (!valid && item.path.length > 0) {
@@ -2281,7 +2072,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                             });
                     });
 
-                    // Browse button
                     row.addExtraButton(btn => {
                         btn.setIcon?.('folder-open');
                         if (!btn.setIcon) btn.setButtonText('Browse');
@@ -2313,7 +2103,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                         });
                     });
 
-                    // Label input
                     row.addText(t => {
                         t.setPlaceholder('Optional label (e.g., Screenshots)')
                             .setValue(item.label || '')
@@ -2323,7 +2112,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                             });
                     });
 
-                    // Reorder up/down
                     row.addExtraButton(btn => {
                         btn.setIcon?.('arrow-up');
                         if (!btn.setIcon) btn.setButtonText('Up');
@@ -2353,7 +2141,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                         });
                     });
 
-                    // Remove row
                     row.addExtraButton(btn => {
                         btn.setIcon?.('trash');
                         if (!btn.setIcon) btn.setButtonText('Remove');
@@ -2366,7 +2153,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                     });
                 });
 
-                // Add row button
                 const addRow = new import_obsidian.Setting(section).setName('Add folder');
                 addRow.addButton(b => b.setButtonText('+ Add').setCta().onClick(async () => {
                     folders.push({ path: '', label: '' });
@@ -2388,7 +2174,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                     if (this.plugin.settings.useEncryption && !value) {
                         const ok = await new ConfirmationModal(this.app, "Disable encryption?", "Your PAT will be stored in plain text locally. Are you sure?").open();
                         if (!ok) {
-                            // Revert UI state
                             this.plugin.settings.useEncryption = true;
                             await this.plugin.saveSettings();
                             this.display();
@@ -2401,20 +2186,15 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                 }));
 
         if (this.plugin.settings.useEncryption) {
-            // Encrypted mode UI: master password field + token field + save encrypted token button
             new import_obsidian.Setting(containerEl).setName("Master password").setDesc("Set a password to encrypt your token. This is NOT saved.").addText((text) => {
                 text.inputEl.type = "password";
                 text.setPlaceholder("Enter password to set/change token");
-                text.onChange((value) => {
-                    this.masterPassword = value;
-                });
+                text.onChange((value) => { this.masterPassword = value; });
             });
             new import_obsidian.Setting(containerEl).setName("GitHub personal access token").setDesc("Enter your PAT here. It will be encrypted on save.").addText((text) => {
                 text.inputEl.type = "password";
                 text.setPlaceholder("ghp_... (paste new token here)");
-                text.onChange((value) => {
-                    this.githubToken = value;
-                });
+                text.onChange((value) => { this.githubToken = value; });
             });
             new import_obsidian.Setting(containerEl).addButton((button) => button.setButtonText("Save encrypted token").setCta().onClick(async () => {
                 if (!this.masterPassword || !this.githubToken) {
@@ -2424,7 +2204,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                 try {
                     const encrypted = await encrypt(this.githubToken, this.masterPassword);
                     this.plugin.settings.encryptedToken = encrypted;
-                    // Clear plain token for security when switching to encrypted mode
                     this.plugin.settings.plainToken = "";
                     this.plugin.clearRepoPrivacyCache();
                     this.plugin.clearRepoListCache();
@@ -2435,7 +2214,6 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                 }
             }));
         } else {
-            // Plain mode UI: simple plain PAT field, no password prompts
             new import_obsidian.Setting(containerEl)
                 .setName("GitHub personal access token (plain)")
                 .setDesc("Stored in plain text. No password prompts in this mode.")
@@ -2461,39 +2239,25 @@ var ConfirmationModal = class extends import_obsidian.Modal {
         this.message = message;
         this.confirmed = false;
     }
-
     open() {
         return new Promise((resolve) => {
             this.resolve = resolve;
             super.open();
         });
     }
-
     onOpen() {
         const { contentEl } = this;
         contentEl.createEl("h2", { text: this.title });
         contentEl.createEl("p", { text: this.message });
 
         new import_obsidian.Setting(contentEl)
-            .addButton(btn => btn
-                .setButtonText("Yes")
-                .setCta()
-                .onClick(() => {
-                    this.confirmed = true;
-                    this.close();
-                }))
-            .addButton(btn => btn
-                .setButtonText("No")
-                .onClick(() => {
-                    this.confirmed = false;
-                    this.close();
-                }));
+            .addButton(btn => btn.setButtonText("Yes").setCta().onClick(() => { this.confirmed = true; this.close(); }))
+            .addButton(btn => btn.setButtonText("No").onClick(() => { this.confirmed = false; this.close(); }));
     }
-
     onClose() {
         this.resolve(this.confirmed);
     }
-}
+};
 
 var RepoMismatchModal = class extends import_obsidian.Modal {
     constructor(app, repoKey) {
@@ -2501,20 +2265,16 @@ var RepoMismatchModal = class extends import_obsidian.Modal {
         this.repoKey = repoKey;
         this.choice = null;
     }
-
     openAndWait() {
         return new Promise((resolve) => {
             this.resolve = resolve;
             super.open();
         });
     }
-
     onOpen() {
         const { contentEl } = this;
         contentEl.createEl("h2", { text: "Repository Privacy Mismatch Detected" });
-        contentEl.createEl("p", {
-            text: `Your repository "${this.repoKey}" appears to be private, but some images in this note use public raw URLs that may not load correctly.`
-        });
+        contentEl.createEl("p", { text: `Your repository "${this.repoKey}" appears to be private, but some images in this note use public raw URLs that may not load correctly.` });
         contentEl.createEl("p", { text: "How would you like NotePix to handle image URLs going forward?" });
 
         const buttonContainer = contentEl.createDiv({ cls: 'notepix-mismatch-buttons' });
@@ -2536,21 +2296,16 @@ var RepoMismatchModal = class extends import_obsidian.Modal {
                 descEl.style.marginTop = '2px';
                 descEl.style.marginLeft = '12px';
             }
-            btn.onclick = () => {
-                this.choice = choice;
-                this.close();
-            };
+            btn.onclick = () => { this.choice = choice; this.close(); };
         };
 
         makeBtn("Use Auto Mode", "Detects repo type and adapts automatically. Recommended.", "auto", true);
         makeBtn("Switch to Private", "All future uploads will use the private image format.", "private", false);
         makeBtn("Keep Public", "No change. Raw URLs may not load for private repos.", "public", false);
     }
-
     onClose() {
         if (this.resolve) this.resolve(this.choice);
     }
-}
+};
 
 module.exports = MyPlugin;
-
