@@ -100,8 +100,8 @@ var DEFAULT_SETTINGS = {
     repoVisibility: 'auto',
     repoHistory: [],
     uploadOnPaste: 'always',
-    localImageFolder: 'notepix-local',
-    uploadImageFolder: 'notepix-uploads',
+    localImageFolder: 'Notepixs-local',
+    uploadImageFolder: 'Notepixs-uploads',
     autoUpload: true,
     extraWatchedFolders: '',
     extraWatchedList: [],
@@ -184,7 +184,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 await this.handleImageUpload(file, false);
                 successCount++;
             } catch (err) {
-                console.error(`NotePix error migrating file: ${file.name}`, err);
+                console.error(`Notepixs error migrating file: ${file.name}`, err);
             }
         }
 
@@ -288,7 +288,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             };
             return unique;
         } catch (e) {
-            console.error('NotePix: Failed to fetch repo list for configured user', e);
+            console.error('Notepixs: Failed to fetch repo list for configured user', e);
             return [];
         }
     }
@@ -366,10 +366,10 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     return;
                 }
                 await this.app.vault.modify(abs, updated);
-                new import_obsidian.Notice(`NotePix: Migrated ${replacedCount} legacy image link(s) to v2 format.`, 3500);
+                new import_obsidian.Notice(`Notepixs: Migrated ${replacedCount} legacy image link(s) to v2 format.`, 3500);
             }
         } catch (e) {
-            console.error('NotePix: Failed to migrate legacy links', e);
+            console.error('Notepixs: Failed to migrate legacy links', e);
         }
     }
 
@@ -399,9 +399,9 @@ var MyPlugin = class extends import_obsidian.Plugin {
     getPrimaryLocalFolderPath() {
         const fromList = (Array.isArray(this.settings.localOnlyList) && this.settings.localOnlyList.length > 0)
             ? (this.settings.localOnlyList[0]?.path || this.settings.localOnlyList[0] || '')
-            : (this.settings.localImageFolder || 'notepix-local');
-        const cleaned = this.normalizeVaultPath(fromList || 'notepix-local');
-        return cleaned || 'notepix-local';
+            : (this.settings.localImageFolder || 'Notepixs-local');
+        const cleaned = this.normalizeVaultPath(fromList || 'Notepixs-local');
+        return cleaned || 'Notepixs-local';
     }
 
     async ensureFolderExists(folderPath) {
@@ -477,7 +477,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                         }
                     }
                 } catch (e) {
-                    console.error('NotePix: error tracking mobile placeholders', e);
+                    console.error('Notepixs: error tracking mobile placeholders', e);
                 }
             };
             cm.on('change', handler);
@@ -590,7 +590,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 const filePathNorm = file.path.replace(/\\\\/g, "/");
                 const localOnly = (Array.isArray(this.settings.localOnlyList) && this.settings.localOnlyList.length > 0
                     ? this.settings.localOnlyList
-                    : (this.settings.localOnlyFolders || this.settings.localImageFolder || 'notepix-local').split(','))
+                    : (this.settings.localOnlyFolders || this.settings.localImageFolder || 'Notepixs-local').split(','))
                     .map(s => (typeof s === 'string' ? s : s.path || ''))
                     .map(s => (s || '').trim())
                     .filter(Boolean)
@@ -599,7 +599,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
 
                 if (!this.settings.autoUpload) return;
 
-                const uploadNorm = (this.settings.uploadImageFolder || 'notepix-uploads')
+                const uploadNorm = (this.settings.uploadImageFolder || 'Notepixs-uploads')
                     .replace(/\\\\/g, "/")
                     .replace(/^\/+|\/+$/g, "");
                 const extra = (Array.isArray(this.settings.extraWatchedList) && this.settings.extraWatchedList.length > 0
@@ -719,7 +719,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             return;
         }
 
-        const uploadFolder = (this.settings.uploadImageFolder || 'notepix-uploads')
+        const uploadFolder = (this.settings.uploadImageFolder || 'Notepixs-uploads')
             .replace(/\\\\/g, "/")
             .replace(/^\/+|\/+$/g, "");
         try {
@@ -775,8 +775,8 @@ var MyPlugin = class extends import_obsidian.Plugin {
 
         const localOnlyFirst = (Array.isArray(this.settings.localOnlyList) && this.settings.localOnlyList.length > 0)
             ? (this.settings.localOnlyList[0]?.path || this.settings.localOnlyList[0] || '')
-            : (this.settings.localImageFolder || 'notepix-local');
-        const folderPath = (localOnlyFirst || 'notepix-local')
+            : (this.settings.localImageFolder || 'Notepixs-local');
+        const folderPath = (localOnlyFirst || 'Notepixs-local')
             .replace(/\\\\/g, "/")
             .replace(/^\/+|\/+$/g, "");
         try {
@@ -830,7 +830,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
 
         if (this.settings.useEncryption) {
             if (!this.settings.encryptedToken) {
-                new import_obsidian.Notice("No encrypted token found. Please save an encrypted token in NotePix settings.");
+                new import_obsidian.Notice("No encrypted token found. Please save an encrypted token in Notepixs settings.");
                 return null;
             }
             return await this.getDecryptedToken();
@@ -839,7 +839,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
         if (this.settings.plainToken && this.settings.plainToken.trim().length > 0) {
             return this.settings.plainToken.trim();
         }
-        new import_obsidian.Notice("No token found. Please provide a GitHub token in NotePix settings.");
+        new import_obsidian.Notice("No token found. Please provide a GitHub token in Notepixs settings.");
         return null;
     }
 
@@ -869,7 +869,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             this.repoPrivacyCache = { value, timestamp: Date.now(), user, repo };
             return value;
         } catch (e) {
-            console.error("NotePix: Failed to detect repo privacy:", e);
+            console.error("Notepixs: Failed to detect repo privacy:", e);
             return "unknown";
         }
     }
@@ -891,9 +891,9 @@ var MyPlugin = class extends import_obsidian.Plugin {
         return rawConfiguredUserRegex.test(content);
     }
 
-    sanitizeMalformedNotepixLinks(content) {
+    sanitizeMalformedNotepixsLinks(content) {
         if (!content || typeof content !== 'string') return content;
-        const malformedNestedLink = /!\[([^\]]*)\]\(\[obsidian:\/\/notepix\/[^\]]*\]\((obsidian:\/\/notepix\/v2\/[^)]+)\)\/([^)]+)\)/g;
+        const malformedNestedLink = /!\[([^\]]*)\]\(\[obsidian:\/\/Notepixs\/[^\]]*\]\((obsidian:\/\/Notepixs\/v2\/[^)]+)\)\/([^)]+)\)/g;
         return content.replace(malformedNestedLink, (_m, alt, base, tail) => {
             const safeAlt = String(alt || '');
             const cleanedBase = String(base || '').replace(/\/+$/, '');
@@ -906,13 +906,13 @@ var MyPlugin = class extends import_obsidian.Plugin {
         try {
             if (!file || !file.path || !file.path.endsWith('.md')) return;
             const content = await this.app.vault.read(file);
-            const normalized = this.sanitizeMalformedNotepixLinks(content);
+            const normalized = this.sanitizeMalformedNotepixsLinks(content);
             if (normalized !== content) {
                 await this.app.vault.modify(file, normalized);
-                new import_obsidian.Notice("NotePix: Repaired malformed image link format in this note.", 4000);
+                new import_obsidian.Notice("Notepixs: Repaired malformed image link format in this note.", 4000);
             }
         } catch (e) {
-            console.error("NotePix: sanitizeFileOnOpen error:", e);
+            console.error("Notepixs: sanitizeFileOnOpen error:", e);
         }
     }
 
@@ -948,17 +948,17 @@ var MyPlugin = class extends import_obsidian.Plugin {
 
                 if (choice === 'auto') {
                     this.settings.repoVisibility = 'auto';
-                    new import_obsidian.Notice("NotePix: Auto mode enabled. Images will load via API for private repos.");
+                    new import_obsidian.Notice("Notepixs: Auto mode enabled. Images will load via API for private repos.");
                 } else if (choice === 'private') {
                     this.settings.repoVisibility = 'private';
-                    new import_obsidian.Notice("NotePix: Switched to Private mode. Future uploads use private format.");
+                    new import_obsidian.Notice("Notepixs: Switched to Private mode. Future uploads use private format.");
                 } else if (choice === 'public') {
                     this.settings.repoVisibility = 'public';
-                    new import_obsidian.Notice("NotePix: Keeping Public mode. Raw URLs may not load for private repos.");
+                    new import_obsidian.Notice("Notepixs: Keeping Public mode. Raw URLs may not load for private repos.");
                 }
                 await this.saveSettings();
             } catch (e) {
-                console.error("NotePix: Mismatch check error:", e);
+                console.error("Notepixs: Mismatch check error:", e);
             }
         }, 500);
     }
@@ -977,13 +977,13 @@ var MyPlugin = class extends import_obsidian.Plugin {
 
         if (choice === 'auto') {
             this.settings.repoVisibility = 'auto';
-            new import_obsidian.Notice("NotePix: Auto mode enabled. Images will load via API for private repos.");
+            new import_obsidian.Notice("Notepixs: Auto mode enabled. Images will load via API for private repos.");
         } else if (choice === 'private') {
             this.settings.repoVisibility = 'private';
-            new import_obsidian.Notice("NotePix: Switched to Private mode. Future uploads use private format.");
+            new import_obsidian.Notice("Notepixs: Switched to Private mode. Future uploads use private format.");
         } else if (choice === 'public') {
             this.settings.repoVisibility = 'public';
-            new import_obsidian.Notice("NotePix: Keeping Public mode. Raw URLs may not load for private repos.");
+            new import_obsidian.Notice("Notepixs: Keeping Public mode. Raw URLs may not load for private repos.");
         }
         await this.saveSettings();
         return choice;
@@ -1031,7 +1031,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 const encRepo = encodeURIComponent(this.settings.repoName);
                 const encBranch = encodeURIComponent(this.settings.branchName);
                 const encPath = filePath.split('/').map(encodeURIComponent).join('/');
-                finalUrl = `obsidian://notepix/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
+                finalUrl = `obsidian://Notepixs/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
                 new import_obsidian.Notice("Private image link created.");
             } else if (this.settings.repoVisibility === 'auto') {
                 const detectedPrivacy = await this.getRepoPrivacy();
@@ -1040,7 +1040,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     const encRepo = encodeURIComponent(this.settings.repoName);
                     const encBranch = encodeURIComponent(this.settings.branchName);
                     const encPath = filePath.split('/').map(encodeURIComponent).join('/');
-                    finalUrl = `obsidian://notepix/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
+                    finalUrl = `obsidian://Notepixs/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
                     new import_obsidian.Notice("Private repo detected. Private image link created.");
                 } else {
                     finalUrl = `https://raw.githubusercontent.com/${this.settings.githubUser}/${this.settings.repoName}/${this.settings.branchName}/${filePath}`;
@@ -1059,7 +1059,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     const encRepo = encodeURIComponent(this.settings.repoName);
                     const encBranch = encodeURIComponent(this.settings.branchName);
                     const encPath = filePath.split('/').map(encodeURIComponent).join('/');
-                    finalUrl = `obsidian://notepix/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
+                    finalUrl = `obsidian://Notepixs/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
                 } else {
                     finalUrl = `https://raw.githubusercontent.com/${this.settings.githubUser}/${this.settings.repoName}/${this.settings.branchName}/${filePath}`;
                 }
@@ -1103,16 +1103,16 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 try { return decodeURIComponent(value); } catch (_) { return value; }
             };
 
-            const recoverMalformedNotepixSrc = (src) => {
+            const recoverMalformedNotepixsSrc = (src) => {
                 if (!src) return null;
                 let candidate = src;
                 if (candidate.startsWith("app://")) {
-                    const idx = candidate.indexOf("%5Bobsidian://notepix/");
+                    const idx = candidate.indexOf("%5Bobsidian://Notepixs/");
                     if (idx >= 0) {
                         try { candidate = decodeURIComponent(candidate.substring(idx)); } catch (_) {}
                     }
                 }
-                const malformed = candidate.match(/\[obsidian:\/\/notepix\/[^\]]*\]\((obsidian:\/\/notepix\/v2\/[^)]+)\)\/(.+)$/);
+                const malformed = candidate.match(/\[obsidian:\/\/Notepixs\/[^\]]*\]\((obsidian:\/\/Notepixs\/v2\/[^)]+)\)\/(.+)$/);
                 if (!malformed) return null;
                 const base = (malformed[1] || "").replace(/\/+$/, "");
                 const tail = (malformed[2] || "").replace(/^\/+/, "");
@@ -1130,14 +1130,14 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 let src = img.getAttribute("src");
                 if (!src) continue;
 
-                const recovered = recoverMalformedNotepixSrc(src);
+                const recovered = recoverMalformedNotepixsSrc(src);
                 if (recovered) {
                     src = recovered;
                     img.setAttribute("src", recovered);
                 }
 
-                if (src.startsWith("obsidian://notepix/")) {
-                    const afterPrefix = src.substring("obsidian://notepix/".length);
+                if (src.startsWith("obsidian://Notepixs/")) {
+                    const afterPrefix = src.substring("obsidian://Notepixs/".length);
                     if (afterPrefix.startsWith("v2/")) {
                         const parts = afterPrefix.substring(3).split('/');
                         if (parts.length >= 4) {
@@ -1147,7 +1147,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                                 repo: decodeSegmentSafely(parts[1]),
                                 branch: decodeSegmentSafely(parts[2]),
                                 path: parts.slice(3).map(decodeSegmentSafely).join('/'),
-                                type: 'notepix-v2'
+                                type: 'Notepixs-v2'
                             });
                         }
                     } else {
@@ -1159,7 +1159,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                             branch: this.settings.branchName || 'main',
                             legacySrc: src,
                             path: decodePathSafely(afterPrefix),
-                            type: 'notepix-legacy'
+                            type: 'Notepixs-legacy'
                         });
                     }
                 } else if (rawSameUserRegex) {
@@ -1224,7 +1224,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             }
 
             let configuredUserRepos = [];
-            const hasLegacyLinks = toProcess.some(item => item?.type === 'notepix-legacy');
+            const hasLegacyLinks = toProcess.some(item => item?.type === 'Notepixs-legacy');
             if (hasLegacyLinks && cfgUser && token) {
                 configuredUserRepos = await this.getConfiguredUserRepoList(token);
             }
@@ -1236,7 +1236,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             const fetchAndSet = async (item) => {
                 const { img, owner, repo, branch, path, type } = item;
                 let repoCandidates = [repo];
-                if (type === 'notepix-legacy') {
+                if (type === 'Notepixs-legacy') {
                     const staticCandidates = Array.isArray(item.fallbackRepos) ? item.fallbackRepos : [];
                     const dynamicCandidates = Array.isArray(configuredUserRepos) ? configuredUserRepos : [];
                     const legacyKey = `${owner}|${branch}|${path}`;
@@ -1320,7 +1320,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 }
 
                 if (!resolvedRepo) {
-                    if (type === 'notepix-legacy') {
+                    if (type === 'Notepixs-legacy') {
                         const legacyKey = `${owner}|${branch}|${path}`;
                         this.legacyUnresolvedUntil.set(legacyKey, Date.now() + 5 * 60 * 1000);
                     }
@@ -1328,19 +1328,19 @@ var MyPlugin = class extends import_obsidian.Plugin {
                     return;
                 }
 
-                if (type === 'notepix-legacy') {
+                if (type === 'Notepixs-legacy') {
                     const legacyKey = `${owner}|${branch}|${path}`;
                     this.legacyResolvedRepoByKey.set(legacyKey, resolvedRepo);
                     this.legacyUnresolvedUntil.delete(legacyKey);
                 }
 
-                if (type === 'notepix-legacy' && item.legacySrc && context?.sourcePath) {
+                if (type === 'Notepixs-legacy' && item.legacySrc && context?.sourcePath) {
                     const encOwner = encodeURIComponent(owner || '');
                     const encRepo = encodeURIComponent(resolvedRepo || '');
                     const encBranch = encodeURIComponent(branch || 'main');
                     const encPath = String(path || '').split('/').map(encodeURIComponent).join('/');
                     if (encOwner && encRepo && encBranch && encPath) {
-                        const v2Url = `obsidian://notepix/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
+                        const v2Url = `obsidian://Notepixs/v2/${encOwner}/${encRepo}/${encBranch}/${encPath}`;
                         this.queueLegacyLinkMigration(context.sourcePath, item.legacySrc, v2Url);
                     }
                 }
@@ -1363,13 +1363,13 @@ var MyPlugin = class extends import_obsidian.Plugin {
                         for (const addedImg of imgs) {
                             let src = addedImg.getAttribute('src');
                             if (!src) continue;
-                            const recovered = recoverMalformedNotepixSrc(src);
+                            const recovered = recoverMalformedNotepixsSrc(src);
                             if (recovered) {
                                 src = recovered;
                                 addedImg.setAttribute('src', recovered);
                             }
-                            if (!src.startsWith('obsidian://notepix/')) continue;
-                            const afterPrefix = src.substring("obsidian://notepix/".length);
+                            if (!src.startsWith('obsidian://Notepixs/')) continue;
+                            const afterPrefix = src.substring("obsidian://Notepixs/".length);
                             if (afterPrefix.startsWith("v2/")) {
                                 const parts = afterPrefix.substring(3).split('/');
                                 if (parts.length >= 4) {
@@ -1379,7 +1379,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                                         repo: decodeSegmentSafely(parts[1]),
                                         branch: decodeSegmentSafely(parts[2]),
                                         path: parts.slice(3).map(decodeSegmentSafely).join('/'),
-                                        type: 'notepix-v2'
+                                        type: 'Notepixs-v2'
                                     });
                                 }
                             } else {
@@ -1389,7 +1389,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                                     repo: cfgRepo,
                                     branch: this.settings.branchName || 'main',
                                     path: decodePathSafely(afterPrefix),
-                                    type: 'notepix-legacy'
+                                    type: 'Notepixs-legacy'
                                 });
                             }
                         }
@@ -1420,7 +1420,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 const buildReplacedContent = (content) => {
                     if (!content) return { replaced: false, newContent: content };
 
-                    const malformedNestedLink = /!\[([^\]]*)\]\(\[obsidian:\/\/notepix\/[^\]]*\]\((obsidian:\/\/notepix\/v2\/[^)]+)\)\/([^)]+)\)/g;
+                    const malformedNestedLink = /!\[([^\]]*)\]\(\[obsidian:\/\/Notepixs\/[^\]]*\]\((obsidian:\/\/Notepixs\/v2\/[^)]+)\)\/([^)]+)\)/g;
                     let normalizedContent = content.replace(malformedNestedLink, (_m, alt, base, tail) => {
                         const cleanedBase = String(base || '').replace(/\/+$/, '');
                         const cleanedTail = String(tail || '').replace(/^\/+/, '');
@@ -1602,7 +1602,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 new import_obsidian.Notice(`${relocation.originalName} moved to local-only folder. Please update the link manually.`);
             }
         } catch (e) {
-            console.error('NotePix: Failed to move declined attachment', e);
+            console.error('Notepixs: Failed to move declined attachment', e);
             new import_obsidian.Notice(`Could not move ${file.name} to local folder.`);
         }
     }
@@ -1670,7 +1670,7 @@ var SimpleFolderPickerModal = class extends import_obsidian.Modal {
         const { contentEl } = this;
         contentEl.empty();
         contentEl.createEl('h3', { text: 'Choose a folder' });
-        const list = contentEl.createEl('div', { cls: 'notepix-folder-picker' });
+        const list = contentEl.createEl('div', { cls: 'Notepixs-folder-picker' });
         const makeButton = (label, val) => {
             const btn = list.createEl('button', { text: label, cls: 'mod-cta' });
             btn.style.display = 'block';
@@ -1718,7 +1718,7 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
         this.githubToken = "";
         this.plugin = plugin;
         this.showExtraFolders = (this.plugin.settings.extraWatchedFolders || "").trim().length > 0;
-        this.lastValidUploadFolder = this.plugin.settings.uploadImageFolder || 'notepix-uploads';
+        this.lastValidUploadFolder = this.plugin.settings.uploadImageFolder || 'Notepixs-uploads';
     }
     display() {
         const { containerEl } = this;
@@ -1785,7 +1785,7 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
             .setName("Local image folder")
             .setDesc("The primary folder where images will be saved when you choose not to upload them.")
             .addText(text => text
-                .setPlaceholder("notepix-local")
+                .setPlaceholder("Notepixs-local")
                 .setValue(this.plugin.settings.localImageFolder)
                 .onChange(async (value) => {
                     this.plugin.settings.localImageFolder = value;
@@ -1810,17 +1810,17 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
             if (!btn.setIcon) btn.setButtonText("+");
             btn.setTooltip?.("Add more local-only folders");
             btn.onClick(() => {
-                const section = containerEl.querySelector('.notepix-localonly-folders');
+                const section = containerEl.querySelector('.Notepixs-localonly-folders');
                 if (!section) renderLocalOnlyRows();
             });
         });
 
-        const localOnlyAnchor = containerEl.createDiv({ cls: 'notepix-localonly-anchor' });
+        const localOnlyAnchor = containerEl.createDiv({ cls: 'Notepixs-localonly-anchor' });
 
         const renderLocalOnlyRows = () => {
-            const existing = localOnlyAnchor.querySelector('.notepix-localonly-folders');
+            const existing = localOnlyAnchor.querySelector('.Notepixs-localonly-folders');
             if (existing) existing.remove();
-            const section = localOnlyAnchor.createDiv({ cls: 'notepix-localonly-folders' });
+            const section = localOnlyAnchor.createDiv({ cls: 'Notepixs-localonly-folders' });
             section.createEl('h4', { text: 'Additional local-only folders' });
 
             const fromCSV = (v) => (v || '').split(',').map(s => s.trim()).filter(Boolean).map(p => ({ path: p, label: '' }));
@@ -1832,7 +1832,7 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
             const isValidPath = (p) => allFolders.includes(p) || p === '';
 
             const save = async () => {
-                const uploadNorm = (this.plugin.settings.uploadImageFolder || 'notepix-uploads').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
+                const uploadNorm = (this.plugin.settings.uploadImageFolder || 'Notepixs-uploads').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
                 const extra = (Array.isArray(this.plugin.settings.extraWatchedList) && this.plugin.settings.extraWatchedList.length > 0
                     ? this.plugin.settings.extraWatchedList.map(e => e?.path || '')
                     : (this.plugin.settings.extraWatchedFolders || '').split(','))
@@ -1936,16 +1936,16 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
 
         const uploadSetting = new import_obsidian.Setting(containerEl)
             .setName("Upload image folder")
-            .setDesc("Default folder where NotePix saves images that will be uploaded.");
+            .setDesc("Default folder where Notepixs saves images that will be uploaded.");
         uploadSetting.addText(text => {
             text
-                .setPlaceholder("notepix-uploads")
-                .setValue(this.plugin.settings.uploadImageFolder || 'notepix-uploads')
+                .setPlaceholder("Notepixs-uploads")
+                .setValue(this.plugin.settings.uploadImageFolder || 'Notepixs-uploads')
                 .onChange(async (value) => {
                     const val = (value || '').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "").trim();
                     const localOnly = (Array.isArray(this.plugin.settings.localOnlyList) && this.plugin.settings.localOnlyList.length > 0
                         ? this.plugin.settings.localOnlyList.map(e => e?.path || '')
-                        : (this.plugin.settings.localOnlyFolders || this.plugin.settings.localImageFolder || 'notepix-local').split(','))
+                        : (this.plugin.settings.localOnlyFolders || this.plugin.settings.localImageFolder || 'Notepixs-local').split(','))
                         .map(s => (s || '').trim())
                         .filter(Boolean)
                         .map(s => s.replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, ""));
@@ -1955,7 +1955,7 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                         text.inputEl.style.borderColor = 'var(--color-red)';
                         new import_obsidian.Notice("Upload folder cannot be one of the local-only folders.");
                         setTimeout(() => {
-                            text.setValue(this.lastValidUploadFolder || 'notepix-uploads');
+                            text.setValue(this.lastValidUploadFolder || 'Notepixs-uploads');
                             text.inputEl.style.borderColor = '';
                         }, 0);
                         return;
@@ -1977,7 +1977,7 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                     const val = (picked || '').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
                     const localOnly = (Array.isArray(this.plugin.settings.localOnlyList) && this.plugin.settings.localOnlyList.length > 0
                         ? this.plugin.settings.localOnlyList.map(e => e?.path || '')
-                        : (this.plugin.settings.localOnlyFolders || this.plugin.settings.localImageFolder || 'notepix-local').split(','))
+                        : (this.plugin.settings.localOnlyFolders || this.plugin.settings.localImageFolder || 'Notepixs-local').split(','))
                         .map(s => (s || '').trim())
                         .filter(Boolean)
                         .map(s => s.replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, ""));
@@ -2004,7 +2004,7 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                 });
         }
 
-        const extraAnchor = containerEl.createDiv({ cls: 'notepix-extra-anchor' });
+        const extraAnchor = containerEl.createDiv({ cls: 'Notepixs-extra-anchor' });
         uploadSetting.addExtraButton((btn) => {
             btn.setIcon?.("plus");
             btn.setTooltip?.("Add more folders to watch");
@@ -2042,9 +2042,9 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
             };
 
             const renderRows = () => {
-                const existing = extraAnchor.querySelector('.notepix-extra-folders');
+                const existing = extraAnchor.querySelector('.Notepixs-extra-folders');
                 if (existing) existing.remove();
-                const section = extraAnchor.createDiv({ cls: 'notepix-extra-folders' });
+                const section = extraAnchor.createDiv({ cls: 'Notepixs-extra-folders' });
 
                 folders.forEach((item, idx) => {
                     const row = new import_obsidian.Setting(section).setName(`Folder ${idx + 1}`);
@@ -2053,10 +2053,10 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                             .setValue(item.path)
                             .onChange(async (val) => {
                                 item.path = val.trim();
-                                const uploadNorm = (this.plugin.settings.uploadImageFolder || 'notepix-uploads').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
+                                const uploadNorm = (this.plugin.settings.uploadImageFolder || 'Notepixs-uploads').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
                                 const localOnly = (Array.isArray(this.plugin.settings.localOnlyList) && this.plugin.settings.localOnlyList.length > 0
                                     ? this.plugin.settings.localOnlyList.map(e => e?.path || '')
-                                    : (this.plugin.settings.localOnlyFolders || this.plugin.settings.localImageFolder || 'notepix-local').split(','))
+                                    : (this.plugin.settings.localOnlyFolders || this.plugin.settings.localImageFolder || 'Notepixs-local').split(','))
                                     .map(s => (s || '').trim())
                                     .filter(Boolean)
                                     .map(s => s.replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, ""));
@@ -2078,10 +2078,10 @@ var GitHubUploaderSettingTab = class extends import_obsidian.PluginSettingTab {
                         btn.setTooltip?.('Choose folder from vault');
                         btn.onClick(() => {
                             const modal = new VaultFolderSuggestModal(this.app, allFolders, async (picked) => {
-                                const uploadNorm = (this.plugin.settings.uploadImageFolder || 'notepix-uploads').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
+                                const uploadNorm = (this.plugin.settings.uploadImageFolder || 'Notepixs-uploads').replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, "");
                                 const localOnly = (Array.isArray(this.plugin.settings.localOnlyList) && this.plugin.settings.localOnlyList.length > 0
                                     ? this.plugin.settings.localOnlyList.map(e => e?.path || '')
-                                    : (this.plugin.settings.localOnlyFolders || this.plugin.settings.localImageFolder || 'notepix-local').split(','))
+                                    : (this.plugin.settings.localOnlyFolders || this.plugin.settings.localImageFolder || 'Notepixs-local').split(','))
                                     .map(s => (s || '').trim())
                                     .filter(Boolean)
                                     .map(s => s.replace(/\\\\/g, "/").replace(/^\/+|\/+$/g, ""));
@@ -2275,9 +2275,9 @@ var RepoMismatchModal = class extends import_obsidian.Modal {
         const { contentEl } = this;
         contentEl.createEl("h2", { text: "Repository Privacy Mismatch Detected" });
         contentEl.createEl("p", { text: `Your repository "${this.repoKey}" appears to be private, but some images in this note use public raw URLs that may not load correctly.` });
-        contentEl.createEl("p", { text: "How would you like NotePix to handle image URLs going forward?" });
+        contentEl.createEl("p", { text: "How would you like Notepixs to handle image URLs going forward?" });
 
-        const buttonContainer = contentEl.createDiv({ cls: 'notepix-mismatch-buttons' });
+        const buttonContainer = contentEl.createDiv({ cls: 'Notepixs-mismatch-buttons' });
         buttonContainer.style.display = 'flex';
         buttonContainer.style.flexDirection = 'column';
         buttonContainer.style.gap = '8px';
