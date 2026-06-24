@@ -1,7 +1,7 @@
 {
 	"id": "notepixs",
 	"name": "NotePixs",
-	"version": "0.1",
+	"version": "V1",
 	"minAppVersion": "0.15.0",
 	"description": "Automatically uploads images to your public or private GitHub repository, replacing local links with the corresponding remote URLs",
 	"author": "mike",
