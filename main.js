@@ -135,7 +135,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
     }
 
     // --- NEW METHOD: UPLOAD ALL EXISTING IMAGES ---
-    async uploadAllLocalImagesInNote(activeFile) {
+        async uploadAllLocalImagesInNote(activeFile) {
         if (!this.settings.githubUser || !this.settings.repoName) {
             new import_obsidian.Notice("GitHub User and Repo Name must be configured first.");
             return;
@@ -144,7 +144,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
         const cache = this.app.metadataCache.getFileCache(activeFile);
         const embeds = cache?.embeds || [];
         if (embeds.length === 0) {
-            new import_obsidian.Notice("No embedded files found in this note.");
+            new import_obsidian.Notice("No embedded files found in this note by the cache.");
             return;
         }
 
@@ -156,6 +156,7 @@ var MyPlugin = class extends import_obsidian.Plugin {
             const linkPath = embed.link;
             if (!linkPath) continue;
 
+            // Ignore remote URLs
             if (linkPath.startsWith("http://") || linkPath.startsWith("https://") || linkPath.startsWith("obsidian://")) {
                 continue;
             }
@@ -166,6 +167,35 @@ var MyPlugin = class extends import_obsidian.Plugin {
                 if (imageExtensions.includes(ext) && !seenPaths.has(abstractFile.path)) {
                     seenPaths.add(abstractFile.path);
                     localImageFiles.push(abstractFile);
+                }
+            }
+        }
+
+        if (localImageFiles.length === 0) {
+            new import_obsidian.Notice("No local images matched the upload criteria.");
+            return;
+        }
+
+        new import_obsidian.Notice(`Found ${localImageFiles.length} images. Starting batch upload...`);
+        
+        let successCount = 0;
+        for (const file of localImageFiles) {
+            try {
+                this.captureFilePlaceholder(file);
+                
+                // Call the uploader
+                await this.handleImageUpload(file, false);
+                successCount++;
+            } catch (err) {
+                const innerErr = err.message || JSON.stringify(err);
+                new import_obsidian.Notice(`Failed on item ${file.name}: ${innerErr}`, 5000);
+                console.error(`NotePix error migrating file: ${file.name}`, err);
+            }
+        }
+
+        new import_obsidian.Notice(`Migration complete: ${successCount}/${localImageFiles.length} uploaded successfully.`);
+    }
+
                 }
             }
         }
