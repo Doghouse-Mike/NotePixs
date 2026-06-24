@@ -115,6 +115,72 @@ var DEFAULT_SETTINGS = {
     lastPromptedRepo: ''
 };
 var MyPlugin = class extends import_obsidian.Plugin {
+    // New utility function to upload all existing local images within a targeted note
+    async uploadAllLocalImagesInNote(activeFile) {
+        if (!this.settings.githubUser || !this.settings.repoName) {
+            new import_obsidian.Notice("GitHub User and Repo Name must be configured first.");
+            return;
+        }
+
+        // 1. Get embedded links cached by Obsidian for this note
+        const cache = this.app.metadataCache.getFileCache(activeFile);
+        const embeds = cache?.embeds || [];
+        if (embeds.length === 0) {
+            new import_obsidian.Notice("No embedded files found in this note.");
+            return;
+        }
+
+        // 2. Identify unique local images
+        const imageExtensions = ["png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif"];
+        const localImageFiles = [];
+        const seenPaths = new Set();
+
+        for (const embed of embeds) {
+            const linkPath = embed.link;
+            if (!linkPath) continue;
+
+            // Skip web links or remote NotePix links already processed
+            if (linkPath.startsWith("http://") || linkPath.startsWith("https://") || linkPath.startsWith("obsidian://")) {
+                continue;
+            }
+
+            // Get file metadata relative to vault structure
+            const abstractFile = this.app.metadataCache.getFirstLinkpathDest(linkPath, activeFile.path);
+            if (abstractFile instanceof import_obsidian.TFile) {
+                const ext = abstractFile.extension.toLowerCase();
+                if (imageExtensions.includes(ext) && !seenPaths.has(abstractFile.path)) {
+                    seenPaths.add(abstractFile.path);
+                    localImageFiles.push(abstractFile);
+                }
+            }
+        }
+
+        if (localImageFiles.length === 0) {
+            new import_obsidian.Notice("No local images found to upload.");
+            return;
+        }
+
+        // 3. Process batches sequentially or simultaneously
+        new import_obsidian.Notice(`Found ${localImageFiles.length} local image(s). Starting migration...`);
+        
+        let successCount = 0;
+        for (const file of localImageFiles) {
+            try {
+                // Pre-capture the placeholder signature before running the upload framework
+                this.captureFilePlaceholder(file);
+                
+                // Directly utilize your built-in image processor pipeline
+                // This updates links, clears local files (if deleteLocal is on), and manages your encryption state
+                await this.handleImageUpload(file, false);
+                successCount++;
+            } catch (err) {
+                console.error(`NotePix error migrating file: ${file.name}`, err);
+            }
+        }
+
+        new import_obsidian.Notice(`Finished note migration! Successfully processed ${successCount}/${localImageFiles.length} images.`);
+    }
+
     constructor() {
         super(...arguments);
         // This will hold the decrypted token in memory for the session
@@ -478,6 +544,30 @@ var MyPlugin = class extends import_obsidian.Plugin {
         return await modal.open();
     }
     async onload() {
+            async onload() {
+        await this.loadSettings();
+        this.addSettingTab(new GitHubUploaderSettingTab(this.app, this));
+
+        // --- NEW COMMAND: UPLOAD ALL LOCAL IMAGES IN CURRENT NOTE ---
+        this.addCommand({
+            id: 'upload-all-local-images-in-note',
+            name: 'Upload all local images in current note',
+            editorCallback: async (editor, view) => {
+                const activeFile = view.file;
+                if (!activeFile) {
+                    new import_obsidian.Notice("No active note found.");
+                    return;
+                }
+                await this.uploadAllLocalImagesInNote(activeFile);
+            }
+        });
+        // ------------------------------------------------------------
+
+        // Initialize an in-memory cache for private images
+        this.imageCache = new Map();
+        // ... (rest of your existing onload code remains identical)
+
+        
         await this.loadSettings();
         this.addSettingTab(new GitHubUploaderSettingTab(this.app, this));
 
